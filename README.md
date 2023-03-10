@@ -21,6 +21,7 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
 
 ## Todos
 - [ ] Configurations
+- [ ] Caching
 - [ ] Error handling? Retries?
 - [ ] Cross-region?
 - [ ] Logging?
