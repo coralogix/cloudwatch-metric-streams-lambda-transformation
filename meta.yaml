@@ -1,0 +1,5 @@
+name: cloudwatch-metric-streams-lambda-transformation
+CX_PRODUCT: integrations
+deployable_type: executable
+enabled: false
+lifecycle_status: development
