@@ -32,4 +32,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/nerdswords/yet-another-cloudwatch-exporter => ../../nerdswords/yet-another-cloudwatch-exporter
+// TODO: This is temporary until the change to make metrics associator public is proposed in the upstream.
+replace github.com/nerdswords/yet-another-cloudwatch-exporter => github.com/matej-g/yet-another-cloudwatch-exporter v0.48.0-alpha.0.20230310112616-377b4bca71f5
