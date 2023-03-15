@@ -112,6 +112,12 @@ func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedReso
 					case *metricspb.Metric_DoubleSummary:
 						for _, dp := range t.DoubleSummary.DataPoints {
 							cwm := buildCloudWatchMetric(dp.Labels)
+							svc := config.SupportedServices.GetService(*cwm.Namespace)
+							if svc == nil {
+								fmt.Println("Unknown namespace: ", *cwm.Namespace, *cwm.MetricName)
+								continue
+							}
+
 							if _, ok := resourceCache[*cwm.Namespace]; !ok {
 								resources, err := client.GetResources(context.Background(), &config.Job{
 									Type: *cwm.Namespace,
@@ -124,12 +130,11 @@ func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedReso
 								resourceCache[*cwm.Namespace] = resources
 							}
 
-							svc := config.SupportedServices.GetService(*cwm.Namespace)
 							asc := job.NewMetricsToResourceAssociator(svc.DimensionRegexps, resourceCache[*cwm.Namespace])
 
 							r, skip := asc.AssociateMetricsToResources(cwm)
 							if r == nil || skip {
-								fmt.Println("Could not associate any resource, skipping enchancement for: ", *cwm.Namespace, *cwm.MetricName)
+								fmt.Println("Could not associate any resource, skipping enhancement for: ", *cwm.Namespace, *cwm.MetricName)
 								continue
 							}
 
@@ -140,6 +145,8 @@ func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedReso
 								})
 							}
 						}
+					default:
+						log.Println("Unsupported metric type: ", t)
 					}
 				}
 			}

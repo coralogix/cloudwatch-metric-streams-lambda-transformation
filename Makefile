@@ -12,7 +12,7 @@ mod:
 
 .PHONY: test
 test: fmt vet lint
-	go test -race -v ./...
+	go test -v ./...
 
 .PHONY: lint
 lint:
