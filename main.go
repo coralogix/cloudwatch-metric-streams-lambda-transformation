@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
+	"github.com/sirupsen/logrus"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -28,23 +29,27 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Llongfile)
-
 	lambda.Start(lambdaHandler)
 }
 
 func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (interface{}, error) {
-	resourcesPerNamespace := make(map[string][]*model.TaggedResource)
+	var (
+		logger                    = newLogger(os.Getenv("LOG_LEVEL"))
+		region                    = aws.String(os.Getenv("AWS_REGION"))
+		continueOnResourceFailure = os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "true"
 
-	region := aws.String(os.Getenv("AWS_REGION"))
+		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
+		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
+	)
+
 	cache := session.NewSessionCache(config.ScrapeConf{
 		Discovery: config.Discovery{
 			Jobs: []*config.Job{
 				{
 					Regions: []string{*region},
-					// TODO: We need to declare the empty role, otherwise
-					// the cache setup for tagging API will panic. Consider
-					// fixing upstream in YACE.
+					// We need to declare the empty role, otherwise
+					// the cache setup for APIs will panic. This will force it
+					// to use the default IAM provided by Lambda.
 					Roles: []config.Role{{}},
 				},
 			},
@@ -52,23 +57,20 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, true, logging.NewNopLogger())
 	cache.Refresh()
 
-	role := config.Role{}
-
 	clientTag := apitagging.NewClient(
-		logging.NewNopLogger(),
-		cache.GetTagging(region, role),
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
+		logger,
+		cache.GetTagging(region, config.Role{}),
+		cache.GetASG(region, config.Role{}),
+		cache.GetAPIGateway(region, config.Role{}),
+		cache.GetAPIGatewayV2(region, config.Role{}),
+		cache.GetEC2(region, config.Role{}),
+		cache.GetDMS(region, config.Role{}),
+		cache.GetPrometheus(region, config.Role{}),
+		cache.GetStorageGateway(region, config.Role{}),
 	)
 
-	responseRecords := make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
-
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(record.Data, resourcesPerNamespace, region, clientTag)
+		newData, err := enhanceRecordData(logger, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -90,31 +92,36 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 
 // enchanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
-func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedResource, region *string, client apitagging.Client) ([]byte, error) {
+func enhanceRecordData(
+	logger logging.Logger,
+	continueOnResourceFailure bool,
+	data []byte,
+	resourceCache map[string][]*model.TaggedResource,
+	region *string,
+	client apitagging.Client,
+) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
 			for _, ilm := range ilms.InstrumentationLibraryMetrics {
 				for _, metric := range ilm.Metrics {
-					// TODO: Add others
 					switch t := metric.Data.(type) {
-					case *metricspb.Metric_DoubleSum:
-						for _, dp := range t.DoubleSum.DataPoints {
-							dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
-								Key:   "MatejTest",
-								Value: "test-value",
-							})
-						}
+					// All CloudWatch metrics are exported as summary, we therefore don't need to
+					// currently handle other types.
 					case *metricspb.Metric_DoubleSummary:
 						for _, dp := range t.DoubleSummary.DataPoints {
 							cwm := buildCloudWatchMetric(dp.Labels)
+							if cwm.MetricName == nil || cwm.Namespace == nil {
+								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
+								continue
+							}
 							svc := config.SupportedServices.GetService(*cwm.Namespace)
 							if svc == nil {
-								fmt.Println("Unknown namespace: ", *cwm.Namespace, *cwm.MetricName)
+								logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
 								continue
 							}
 
@@ -123,18 +130,21 @@ func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedReso
 									Type: *cwm.Namespace,
 								}, *region)
 								if err != nil {
-									// TODO: How to handle failure?
-									log.Fatal(err)
+									logger.Error(err, "Failed to get resources for namespace", "namespace", *cwm.Namespace)
+									if continueOnResourceFailure {
+										continue
+									}
+									return nil, err
+
 								}
-								log.Println("Caching result for namespace: ", *cwm.Namespace)
+								logger.Debug("Caching GetResources result for namespace", "namespace", *cwm.Namespace)
 								resourceCache[*cwm.Namespace] = resources
 							}
 
 							asc := job.NewMetricsToResourceAssociator(svc.DimensionRegexps, resourceCache[*cwm.Namespace])
-
 							r, skip := asc.AssociateMetricsToResources(cwm)
 							if r == nil || skip {
-								fmt.Println("Could not associate any resource, skipping enhancement for: ", *cwm.Namespace, *cwm.MetricName)
+								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
 								continue
 							}
 
@@ -146,7 +156,7 @@ func enhanceRecordData(data []byte, resourceCache map[string][]*model.TaggedReso
 							}
 						}
 					default:
-						log.Println("Unsupported metric type: ", t)
+						logger.Debug("Unsupported metric type", t)
 					}
 				}
 			}
@@ -163,7 +173,6 @@ func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *cloudwatch.Metric {
 
 	for _, l := range ll {
 		switch l.Key {
-		// TODO: Handle if either is not present
 		case "MetricName":
 			cwm.MetricName = aws.String(l.Value)
 		case "Namespace":
@@ -215,4 +224,18 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 	}
 
 	return b.Bytes(), nil
+}
+
+func newLogger(level string) logging.Logger {
+	l := logrus.New()
+	l.SetFormatter(&logrus.JSONFormatter{})
+	l.SetOutput(os.Stdout)
+
+	if strings.ToLower(level) == "debug" {
+		l.SetLevel(logrus.DebugLevel)
+	} else {
+		l.SetLevel(logrus.InfoLevel)
+	}
+
+	return logging.NewLogger(l)
 }
