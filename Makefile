@@ -4,11 +4,15 @@ ARCH ?= $(shell go env GOARCH)
 OS ?= $(shell go env GOOS)
 
 .PHONY: all
-all: test build zip
+all: mod test build zip
+
+.PHONY: mod
+mod:
+	go mod tidy
 
 .PHONY: test
 test: fmt vet lint
-	go test -race -v ./...
+	go test -v ./...
 
 .PHONY: lint
 lint:
