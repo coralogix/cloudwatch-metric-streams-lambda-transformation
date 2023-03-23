@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
-	"log"
 	"os"
 	"strings"
 
@@ -72,7 +71,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	for _, record := range request.Records {
 		newData, err := enhanceRecordData(logger, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
 		if err != nil {
-			log.Fatal(err)
+			logger.Error(err, "Failed to enhance record data")
+			return nil, err
 		}
 
 		// Resulting data must be Base64 encoded.
@@ -201,7 +201,7 @@ func rawDataIntoRequests(input []byte) ([]*metricsservicepb.ExportMetricsService
 			if err == io.EOF {
 				break
 			}
-			log.Fatal(err)
+			return nil, err
 		}
 
 		requests = append(requests, rm)
@@ -219,7 +219,7 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 	for _, r := range reqs {
 		_, err := pbutil.WriteDelimited(&b, r)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 	}
 
