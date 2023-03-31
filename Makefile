@@ -53,7 +53,7 @@ s3-check-or-create-buckets:
 		if [ "$$EXISTS_RESULT" != "" ]; then \
 			if (echo $$EXISTS_RESULT | grep -q "404"); then \
 				echo "Bucket not found in $$r, creating" ; \
-				if [ "$$r" == "us-east-1" ]; then \
+				if [ "$$r" = "us-east-1" ]; then \
 					aws s3api create-bucket --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r > /dev/null 2>&1; \
 				else \
 					aws s3api create-bucket --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r --create-bucket-configuration LocationConstraint=$$r > /dev/null 2>&1; \
