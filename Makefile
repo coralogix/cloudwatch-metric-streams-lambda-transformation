@@ -46,9 +46,11 @@ zip:
 
 .PHONY: s3-check-or-create-buckets
 s3-check-or-create-buckets:
-	@for r in $(REGIONS); do \
-		EXISTS_RESULT=$$(aws s3api head-bucket --region $$r --bucket "${BUCKET_BASE_NAME}-$$r" 2>&1); \
-		if [ "$$EXISTS_RESULT" != "" ]; then \
+	@{ \
+	set -e ; \
+	for r in $(REGIONS); do \
+		EXISTS_RESULT=$$(aws s3api head-bucket --region $$r --bucket "${BUCKET_BASE_NAME}-$$r" 2>&1	) || true; \
+		if [[ $$EXISTS_RESULT != "" ]]; then \
 			if (echo $$EXISTS_RESULT | grep -q "404"); then \
 				echo "Bucket not found in $$r, creating" ; \
 				if [ "$$r" == "us-east-1" ]; then \
@@ -61,14 +63,17 @@ s3-check-or-create-buckets:
 				exit 1; \
 			fi; \
 		fi; \
-	done
+	done; \
+	}
 
 .PHONY: s3-publish-function
 s3-publish-function:
-	@for r in $(REGIONS); do \
+	@{ \
+	set -e ; \
+	for r in $(REGIONS); do \
 		echo "Uploading lambda function to ${BUCKET_BASE_NAME}-$$r"; \
 		aws s3 cp ${ZIP_FILE_NAME} s3://${BUCKET_BASE_NAME}-$$r/${ZIP_FILE_NAME} --region $$r; \
 		aws s3api put-object-acl --bucket ${BUCKET_BASE_NAME}-$$r --key ${ZIP_FILE_NAME} --acl public-read --region $$r; \
-	done
-
+	done; \
+	}
 
