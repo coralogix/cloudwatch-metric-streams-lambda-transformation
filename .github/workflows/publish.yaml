@@ -1,16 +1,16 @@
-name: publish-dev
+name: publish
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
 
 jobs:
   publish:
-    environment: testing
+    environment: production
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
