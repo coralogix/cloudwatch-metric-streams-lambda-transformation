@@ -9,7 +9,7 @@ env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
 
 jobs:
-  publish:
+  publish-s3:
     environment: testing
     runs-on: ubuntu-latest
     steps:
