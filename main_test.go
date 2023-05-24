@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/apitagging"
+	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -214,7 +213,7 @@ func Test_enhanceRecordData(t *testing.T) {
 	for _, tt := range testCases {
 		l := logging.NewNopLogger()
 		mockCache := make(map[string][]*model.TaggedResource)
-		mockClient := apitagging.NewClient(
+		mockClient := taggingv1.NewClient(
 			l,
 			mockResourceGroupsTaggingAPIClient{fail: tt.wantErr || tt.continueOnResourceFailure, tagMapping: tt.resourceTagMapping},
 			nil,
@@ -233,7 +232,6 @@ func Test_enhanceRecordData(t *testing.T) {
 			}
 
 			got, err := enhanceRecordData(l, tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient)
-			fmt.Println(err)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -264,7 +262,6 @@ type mockResourceGroupsTaggingAPIClient struct {
 
 func (m mockResourceGroupsTaggingAPIClient) GetResourcesPagesWithContext(ctx aws.Context, input *resourcegroupstaggingapi.GetResourcesInput, fn func(*resourcegroupstaggingapi.GetResourcesOutput, bool) bool, opts ...request.Option) error {
 	if m.fail {
-		fmt.Println("fail")
 		return errors.New("Failed to get resources")
 	}
 
