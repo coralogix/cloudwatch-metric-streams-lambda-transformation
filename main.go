@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
-	clientsv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v1"
+	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/associator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
@@ -40,7 +40,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
 
-	cache := clientsv1.NewClientCache(config.ScrapeConf{
+	cache, err := clientsv2.NewCache(config.ScrapeConf{
 		Discovery: config.Discovery{
 			Jobs: []*config.Job{
 				{
@@ -53,6 +53,9 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 			},
 		},
 	}, true, logging.NewNopLogger())
+	if err != nil {
+		logger.Error(err, "Failed to create a new cache client")
+	}
 	cache.Refresh()
 
 	// For now use the same concurrency as upstream implementation.
