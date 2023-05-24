@@ -52,7 +52,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 				},
 			},
 		},
-	}, true, logging.NewNopLogger())
+	}, false, logging.NewNopLogger())
 	if err != nil {
 		logger.Error(err, "Failed to create a new cache client")
 	}
