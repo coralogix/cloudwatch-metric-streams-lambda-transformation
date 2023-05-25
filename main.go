@@ -9,17 +9,16 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/sirupsen/logrus"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/apitagging"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
+	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/associator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/session"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -41,7 +40,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
 
-	cache := session.NewSessionCache(config.ScrapeConf{
+	cache, err := clientsv2.NewCache(config.ScrapeConf{
 		Discovery: config.Discovery{
 			Jobs: []*config.Job{
 				{
@@ -53,20 +52,14 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 				},
 			},
 		},
-	}, true, logging.NewNopLogger())
+	}, false, logging.NewNopLogger())
+	if err != nil {
+		logger.Error(err, "Failed to create a new cache client")
+	}
 	cache.Refresh()
 
-	clientTag := apitagging.NewClient(
-		logger,
-		cache.GetTagging(region, config.Role{}),
-		cache.GetASG(region, config.Role{}),
-		cache.GetAPIGateway(region, config.Role{}),
-		cache.GetAPIGatewayV2(region, config.Role{}),
-		cache.GetEC2(region, config.Role{}),
-		cache.GetDMS(region, config.Role{}),
-		cache.GetPrometheus(region, config.Role{}),
-		cache.GetStorageGateway(region, config.Role{}),
-	)
+	// For now use the same concurrency as upstream implementation.
+	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
 
 	for _, record := range request.Records {
 		newData, err := enhanceRecordData(logger, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
@@ -98,7 +91,7 @@ func enhanceRecordData(
 	data []byte,
 	resourceCache map[string][]*model.TaggedResource,
 	region *string,
-	client apitagging.Client,
+	client tagging.Client,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -115,36 +108,36 @@ func enhanceRecordData(
 					case *metricspb.Metric_DoubleSummary:
 						for _, dp := range t.DoubleSummary.DataPoints {
 							cwm := buildCloudWatchMetric(dp.Labels)
-							if cwm.MetricName == nil || cwm.Namespace == nil {
-								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
+							if cwm.MetricName == "" || cwm.Namespace == "" {
+								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
-							svc := config.SupportedServices.GetService(*cwm.Namespace)
+							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
+								logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 
-							if _, ok := resourceCache[*cwm.Namespace]; !ok {
+							if _, ok := resourceCache[cwm.Namespace]; !ok {
 								resources, err := client.GetResources(context.Background(), &config.Job{
-									Type: *cwm.Namespace,
+									Type: cwm.Namespace,
 								}, *region)
 								if err != nil {
-									logger.Error(err, "Failed to get resources for namespace", "namespace", *cwm.Namespace)
+									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {
 										continue
 									}
 									return nil, err
 
 								}
-								logger.Debug("Caching GetResources result for namespace", "namespace", *cwm.Namespace)
-								resourceCache[*cwm.Namespace] = resources
+								logger.Debug("Caching GetResources result for namespace", "namespace", cwm.Namespace)
+								resourceCache[cwm.Namespace] = resources
 							}
 
-							asc := job.NewMetricsToResourceAssociator(svc.DimensionRegexps, resourceCache[*cwm.Namespace])
-							r, skip := asc.AssociateMetricsToResources(cwm)
+							asc := associator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
+							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil || skip {
-								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", *cwm.Namespace, "metric", *cwm.MetricName)
+								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 
@@ -168,19 +161,19 @@ func enhanceRecordData(
 
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
 // usage in the metrics associatior.
-func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *cloudwatch.Metric {
-	cwm := &cloudwatch.Metric{}
+func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *model.Metric {
+	cwm := &model.Metric{}
 
 	for _, l := range ll {
 		switch l.Key {
 		case "MetricName":
-			cwm.MetricName = aws.String(l.Value)
+			cwm.MetricName = l.Value
 		case "Namespace":
-			cwm.Namespace = aws.String(l.Value)
+			cwm.Namespace = l.Value
 		default:
-			cwm.Dimensions = append(cwm.Dimensions, &cloudwatch.Dimension{
-				Name:  aws.String(l.Key),
-				Value: aws.String(l.Value),
+			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+				Name:  l.Key,
+				Value: l.Value,
 			})
 		}
 	}

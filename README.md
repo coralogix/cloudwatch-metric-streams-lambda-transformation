@@ -64,5 +64,3 @@ There are couple of costs connected with usage of Lambda transformation. Below, 
 
 ## Todos
 - [ ] Support for JSON data input
-- [ ] Add tests
-- [ ] Use upstream YACE instead of fork
