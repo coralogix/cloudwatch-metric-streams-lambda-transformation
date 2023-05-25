@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**.go'
 
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
