@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Lambda extension reporting function logs and platform telemetry to Coralogix
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: Coralogix-AWS-CloudWatch-Streams-Tag-Enrichment
+    Description: Lambda transformation function to enrich your CloudWatch streams metrics with your AWS tags.
+    Author: Coralogix
+    SpdxLicenseId: Apache-2.0
+    LicenseUrl: ./../LICENSE
+    ReadmeUrl: README.md
+    Labels:
+      - lambda
+      - transformation
+      - coralogix
+      - telemetry
+      - metrics
+      - cloudwatch
+      - streams
+      - tags
+    HomePageUrl: https://coralogix.com
+    SemanticVersion: 0.0.0 # We override this with an argument passed to the sam publish command
+    SourceCodeUrl: https://github.com/coralogix/cloudwatch-metrics-streams-lambda-transformation # TODO: Improve repo name?
+Parameters:
+  LogLevel:
+    Type: String
+    Description: Sets the log level of the Lambda transformation function.
+    AllowedValues:
+      - info
+      - debug
+    Default: info
+  ContinueOnResourceFailure:
+    Type: Bool
+    Description: If set to true, the function will continue on a failure to call the resource tagging API. Otherwise the function will terminate with an error.
+    Default: false
+  FunctionTimeout:
+    Type: Number
+    Description: Lambda function timeout limit
+    MinValue: 30
+    MaxValue: 900
+    Default: 30
+Resources:
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Enhance CloudWatch Streams metrics with AWS resource tags.
+      CodeUri: ./../function.zip
+      Handler: function
+      Runtime: go1.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout:
+        Ref: FunctionTimeout
+      Environment:
+        Variables:
+          LOG_LEVEL:
+            Ref: LogLevel
+          CONTINUE_ON_RESOURCE_FAILURE:
+            Ref: ContinueOnResourceFailure
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - tag:GetResources
+          - ec2:DescribeTags
+          - ec2:DescribeInstances
+          - ec2:DescribeRegions
+          - ec2:DescribeTransitGateway
+          - apigateway:GET
+          Resource: '*'

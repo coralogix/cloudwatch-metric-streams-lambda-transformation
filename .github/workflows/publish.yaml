@@ -9,7 +9,7 @@ env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
 
 jobs:
-  publish:
+  publish-s3:
     environment: production
     runs-on: ubuntu-latest
     steps:
@@ -24,7 +24,7 @@ jobs:
       - name: Build and package
         run: make package
 
-      - name: Setup credentials
+      - name: Setup AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -33,3 +33,43 @@ jobs:
 
       - name: Publish to S3
         run: make publish
+
+      - name: Upload build artifact # For reuse in the SAM job, so we don't need to rebuild.
+        uses: actions/upload-artifact@v3
+        with:
+          name: function.zip
+          path: ./function.zip
+
+  publish-sam:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: function.zip
+
+      - name: Set semantic version env var # This is used when publishing to SAM; we must strip the "v" prefix from tag.
+        run: echo "SAM_SEMANTIC_VERSION=$(echo ${{ github.ref_name }} | cut -c 2-)" >> $GITHUB_ENV # github.ref_name will resolve to tag value.
+
+      - name: Setup SAM
+        uses: aws-actions/setup-sam@v2
+
+      - name: Setup AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Build for SAM
+        run: sam build
+        working-directory: ./serverlessrepo
+
+      - name: Package for SAM
+        run: sam package --s3-bucket ${{ vars.BUCKET_BASE_NAME }}-us-east-1 --output-template-file packaged.yaml # Use bucket in default (us-east-1) region.
+        working-directory: ./serverlessrepo
+
+      - name: Publish to SAM
+        run: sam publish --template packaged.yaml --semantic-version ${{ env.SAM_SEMANTIC_VERSION }} 
+        working-directory: ./serverlessrepo
