@@ -34,11 +34,16 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	var (
 		logger                    = newLogger(os.Getenv("LOG_LEVEL"))
 		region                    = aws.String(os.Getenv("AWS_REGION"))
-		continueOnResourceFailure = os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "true"
+		continueOnResourceFailure = true
 
 		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
 		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
+
+	// Override the default continueOnResourceFailure value if the env var is set.
+	if os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "false" {
+		continueOnResourceFailure = false
+	}
 
 	cache, err := clientsv2.NewCache(config.ScrapeConf{
 		Discovery: config.Discovery{
@@ -122,7 +127,7 @@ func enhanceRecordData(
 								resources, err := client.GetResources(context.Background(), &config.Job{
 									Type: cwm.Namespace,
 								}, *region)
-								if err != nil {
+								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {
 										continue
