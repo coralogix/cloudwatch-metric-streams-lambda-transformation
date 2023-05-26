@@ -1,7 +1,7 @@
- # CloudWatch metric streams Lambda transformation
+ # CloudWatch Metric Streams Lambda transformation
 
 ## About The Project
-This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch metric streams with AWS resource tags.
+This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.
 
 - Accepts Kinesis Firehose events with metric data in [OTLP v0.7, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html)
 - Obtains AWS resource information through the [AWS tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/overview.html) and related APIs (API Gateway, EC2...)
