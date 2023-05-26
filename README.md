@@ -37,13 +37,18 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
     {
       "Action": [
         "tag:GetResources",
-        "ec2:DescribeTags",
-        "ec2:DescribeInstances",
-        "ec2:DescribeRegions",
-        "ec2:DescribeTransitGateway*",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
         "apigateway:GET",
+        "aps:ListWorkspaces",
+        "autoscaling:DescribeAutoScalingGroups",
         "dms:DescribeReplicationInstances",
-        "dms:DescribeReplicationTasks"
+        "dms:DescribeReplicationTasks",
+        "ec2:DescribeTransitGatewayAttachments",
+        "ec2:DescribeSpotFleetRequests",
+        "storagegateway:ListGateways",
+        "storagegateway:ListTagsForResource"
       ],
       "Effect": "Allow",
       "Resource": "*"
