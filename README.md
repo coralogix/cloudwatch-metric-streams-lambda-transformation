@@ -26,7 +26,7 @@ There is a couple of configuration options that can be set via environment varia
 | Environment variable             | Default |Possible values   | Description   |
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
-| `CONTINUE_ON_RESOURCE_FAILURE`   | `false` | `true`           | Determines whether to continue on a failed API call to obtain resources. If set to true, the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false (by default), the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
+| `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
 
 ### Necessary permissions
 The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
