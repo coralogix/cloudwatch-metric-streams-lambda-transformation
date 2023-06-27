@@ -141,7 +141,11 @@ func enhanceRecordData(
 
 							asc := associator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
 							r, skip := asc.AssociateMetricToResource(cwm)
-							if r == nil || skip {
+							if r == nil {
+								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								continue
+							}
+							if skip {
 								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
