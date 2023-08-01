@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/sirupsen/logrus"
@@ -113,6 +114,7 @@ func enhanceRecordData(
 					case *metricspb.Metric_DoubleSummary:
 						for _, dp := range t.DoubleSummary.DataPoints {
 							cwm := buildCloudWatchMetric(dp.Labels)
+							logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
