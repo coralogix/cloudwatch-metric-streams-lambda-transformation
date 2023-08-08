@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -27,6 +29,8 @@ import (
 	"github.com/matttproud/golang_protobuf_extensions/v2/pbutil"
 )
 
+const cacheFile = "cache"
+
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -35,6 +39,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	var (
 		logger                    = newLogger(os.Getenv("LOG_LEVEL"))
 		region                    = aws.String(os.Getenv("AWS_REGION"))
+		efsPath                   = os.Getenv("EFS_PATH")
 		continueOnResourceFailure = true
 
 		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
@@ -58,7 +63,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 				},
 			},
 		},
-	}, false, logging.NewNopLogger())
+	}, false, logger)
 	if err != nil {
 		logger.Error(err, "Failed to create a new cache client")
 	}
@@ -68,7 +73,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
+		newData, err := enhanceRecordData(logger, efsPath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -89,10 +94,83 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
+func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, efsPath, namespace string, region *string) ([]*model.TaggedResource, error) {
+	// if efsPath not set, don't cache.
+	if efsPath == "" {
+		return retrieveResources(namespace, region, client)
+	}
+
+	filePath := efsPath + "/" + cacheFile + "-" + strings.ReplaceAll(namespace, "/", "-")
+
+	f, err := os.Open(filePath)
+	// If we cannot retrieve and it's not not found error, terminate.
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	var isExpired bool
+	if !os.IsNotExist(err) {
+		fs, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		isExpired = fs.ModTime().Add(1 * time.Hour).Before(time.Now()) //TODO: Make this configurable
+	}
+
+	if os.IsNotExist(err) || isExpired {
+		fmt.Println("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
+		resources, err := retrieveResources(namespace, region, client)
+		if err != nil {
+			return nil, err
+		}
+		b, err := json.Marshal(resources)
+		if err != nil {
+			return nil, err
+		}
+
+		f, err := os.Create(filePath)
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = f.Write(b)
+		if err != nil {
+			return nil, err
+		}
+
+		return resources, nil
+	}
+
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	var resources []*model.TaggedResource
+	err = json.Unmarshal(b, &resources)
+	if err != nil {
+		return nil, err
+	}
+
+	return resources, nil
+}
+
+func retrieveResources(namespace string, region *string, client tagging.Client) ([]*model.TaggedResource, error) {
+	resources, err := client.GetResources(context.Background(), &config.Job{
+		Type: namespace,
+	}, *region)
+	if err != nil && err != tagging.ErrExpectedToFindResources {
+		return nil, err
+	}
+
+	return resources, nil
+}
+
 // enchanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
 func enhanceRecordData(
 	logger logging.Logger,
+	efsPath string,
 	continueOnResourceFailure bool,
 	data []byte,
 	resourceCache map[string][]*model.TaggedResource,
@@ -126,18 +204,15 @@ func enhanceRecordData(
 							}
 
 							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := client.GetResources(context.Background(), &config.Job{
-									Type: cwm.Namespace,
-								}, *region)
+								resources, err := getOrCacheResourcesToEFS(logger, client, efsPath, cwm.Namespace, region)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {
 										continue
 									}
 									return nil, err
-
 								}
-								logger.Debug("Caching GetResources result for namespace", "namespace", cwm.Namespace)
+								logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
 								resourceCache[cwm.Namespace] = resources
 							}
 
