@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -37,10 +36,13 @@ func main() {
 
 func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (interface{}, error) {
 	var (
-		logger                    = newLogger(os.Getenv("LOG_LEVEL"))
-		region                    = aws.String(os.Getenv("AWS_REGION"))
-		efsPath                   = os.Getenv("EFS_PATH")
+		logger        = newLogger(os.Getenv("LOG_LEVEL"))
+		region        = aws.String(os.Getenv("AWS_REGION"))
+		fileCachePath = os.Getenv("FILE_CACHE_PATH")
+
+		// Set defaults and if the env var is set, override the default value.
 		continueOnResourceFailure = true
+		fileCacheExpiration       = 1 * time.Hour
 
 		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
 		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
@@ -49,6 +51,15 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	// Override the default continueOnResourceFailure value if the env var is set.
 	if os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "false" {
 		continueOnResourceFailure = false
+	}
+
+	if os.Getenv("FILE_CACHE_EXPIRATION") != "" {
+		d, err := time.ParseDuration(os.Getenv("FILE_CACHE_EXPIRATION"))
+		if err != nil {
+			logger.Error(err, "Failed to parse value for EFS cache expiration, falling back to default 1h")
+		} else {
+			fileCacheExpiration = d
+		}
 	}
 
 	cache, err := clientsv2.NewCache(config.ScrapeConf{
@@ -66,6 +77,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, false, logger)
 	if err != nil {
 		logger.Error(err, "Failed to create a new cache client")
+		return nil, err
 	}
 	cache.Refresh()
 
@@ -73,7 +85,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, efsPath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -94,13 +106,13 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, efsPath, namespace string, region *string) ([]*model.TaggedResource, error) {
-	// if efsPath not set, don't cache.
-	if efsPath == "" {
+func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration) ([]*model.TaggedResource, error) {
+	// If fileCachePath not set, don't cache.
+	if fileCachePath == "" {
 		return retrieveResources(namespace, region, client)
 	}
 
-	filePath := efsPath + "/" + cacheFile + "-" + strings.ReplaceAll(namespace, "/", "-")
+	filePath := fileCachePath + "/" + cacheFile + "-" + strings.ReplaceAll(namespace, "/", "-")
 
 	f, err := os.Open(filePath)
 	// If we cannot retrieve and it's not not found error, terminate.
@@ -114,11 +126,11 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, efsP
 		if err != nil {
 			return nil, err
 		}
-		isExpired = fs.ModTime().Add(1 * time.Hour).Before(time.Now()) //TODO: Make this configurable
+		isExpired = fs.ModTime().Add(cacheExpiration).Before(time.Now())
 	}
 
 	if os.IsNotExist(err) || isExpired {
-		fmt.Println("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
+		logger.Debug("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
 		resources, err := retrieveResources(namespace, region, client)
 		if err != nil {
 			return nil, err
@@ -141,6 +153,7 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, efsP
 		return resources, nil
 	}
 
+	logger.Debug("Reading resources from cached filed", "namespace", namespace)
 	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
@@ -170,12 +183,13 @@ func retrieveResources(namespace string, region *string, client tagging.Client) 
 // looks up the resources for the metrics and adds the tags to the metrics.
 func enhanceRecordData(
 	logger logging.Logger,
-	efsPath string,
+	fileCachePath string,
 	continueOnResourceFailure bool,
 	data []byte,
 	resourceCache map[string][]*model.TaggedResource,
 	region *string,
 	client tagging.Client,
+	fileCacheExpiration time.Duration,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -204,7 +218,7 @@ func enhanceRecordData(
 							}
 
 							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := getOrCacheResourcesToEFS(logger, client, efsPath, cwm.Namespace, region)
+								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {
