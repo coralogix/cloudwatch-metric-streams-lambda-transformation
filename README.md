@@ -15,7 +15,7 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
     - Handler: `function`
     - Architecture: `x86_64` (but you can also build the function for `arm64`)
 3. Upload the `function.zip` file as the code source.
-4. Make sure to set the memory to `128 MB`, as the Lambda will not require more memory.
+4. Make sure to set the memory. We recommend starting with `128 MB` and see if you need to increase it based on the number of metrics
 5. Adjust the role of the Lambda function as described below in section [Necessary permissions](##Necessary_permissions).
 6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](##Configuration) section.
 7. The Lambda function is ready to be used as in [Kinesis Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Kinesis Data Firehose configuration.

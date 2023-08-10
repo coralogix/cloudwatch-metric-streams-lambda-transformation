@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
@@ -11,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -294,7 +298,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -317,6 +321,69 @@ func Test_enhanceRecordData(t *testing.T) {
 	}
 }
 
+func Test_getOrCacheResources(t *testing.T) {
+	testCases := []struct {
+		name              string
+		namespace         string
+		wantResources     []*model.TaggedResource
+		wantResourceCalls int
+		wantCreatedFile   string
+	}{
+		{
+			name:              "Read from cached file",
+			namespace:         "AWS/EFS",
+			wantResources:     []*model.TaggedResource{{Namespace: "AWS/EFS", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/efs"}}, ARN: "arn:aws:cloudwatch:test"}},
+			wantResourceCalls: 0,
+		},
+		{
+			name:              "Fetch and create cache",
+			namespace:         "AWS/EC2",
+			wantResources:     []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
+			wantCreatedFile:   "./cache-AWS-EC2",
+			wantResourceCalls: 1,
+		},
+	}
+
+	createMockCacheForEFS(t)
+	t.Cleanup(func() {
+		os.Remove("./cache-AWS-EFS")
+	})
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Ensure file does not exist, if it should not.
+			if tc.wantCreatedFile != "" {
+				_, err := os.Open(tc.wantCreatedFile)
+				if !os.IsNotExist(err) {
+					t.Fatalf("file %s should not exist", tc.wantCreatedFile)
+				}
+
+				t.Cleanup(func() {
+					os.Remove(tc.wantCreatedFile)
+				})
+			}
+
+			mrg := mockResurcesGetter{
+				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
+			}
+			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour)
+			if err != nil {
+				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.wantResources) {
+				t.Errorf("enhanceRecordData() = %v, want %v", got, tc.wantResources)
+			}
+
+			if tc.wantCreatedFile != "" {
+				_, err := os.Open(tc.wantCreatedFile)
+				if err != nil {
+					t.Errorf("wantedCreatedFile error = %v", err)
+				}
+			}
+		})
+	}
+}
+
 type mockResourceGroupsTaggingAPIClient struct {
 	mockError  error
 	tagMapping []*resourcegroupstaggingapi.ResourceTagMapping
@@ -335,6 +402,14 @@ func (m mockResourceGroupsTaggingAPIClient) GetResourcesPagesWithContext(ctx aws
 	return nil
 }
 
+type mockResurcesGetter struct {
+	mockResources []*model.TaggedResource
+}
+
+func (m mockResurcesGetter) GetResources(ctx context.Context, job *config.Job, region string) ([]*model.TaggedResource, error) {
+	return m.mockResources, nil
+}
+
 func createTestDataFromMetrics(mm []*metricspb.Metric) ([]byte, error) {
 	expReqs := []*metricsservicepb.ExportMetricsServiceRequest{
 		{
@@ -351,4 +426,16 @@ func createTestDataFromMetrics(mm []*metricspb.Metric) ([]byte, error) {
 	}
 
 	return requestsIntoRawData(expReqs)
+}
+
+func createMockCacheForEFS(t *testing.T) {
+	f, err := os.Create("./cache-AWS-EFS")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = f.WriteString(`[{"Namespace":"AWS/EFS","Region":"us-east-1","Tags":[{"Key":"Namespace","Value":"aws/efs"}],"ARN":"arn:aws:cloudwatch:test"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
