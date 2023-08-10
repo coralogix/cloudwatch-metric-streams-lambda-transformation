@@ -339,15 +339,14 @@ func Test_getOrCacheResources(t *testing.T) {
 			name:              "Fetch and create cache",
 			namespace:         "AWS/EC2",
 			wantResources:     []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
-			wantCreatedFile:   "./testdata/cache-AWS-EC2",
+			wantCreatedFile:   "./cache-AWS-EC2",
 			wantResourceCalls: 1,
 		},
 	}
 
-	const testCacheDir = "./testdata"
 	createMockCacheForEFS(t)
 	t.Cleanup(func() {
-		os.Remove("./testdata/cache-AWS-EFS")
+		os.Remove("./cache-AWS-EFS")
 	})
 
 	for _, tc := range testCases {
@@ -367,7 +366,7 @@ func Test_getOrCacheResources(t *testing.T) {
 			mrg := mockResurcesGetter{
 				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
 			}
-			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, testCacheDir, tc.namespace, aws.String("us-east-1"), 1*time.Hour)
+			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour)
 			if err != nil {
 				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
 			}
@@ -430,7 +429,7 @@ func createTestDataFromMetrics(mm []*metricspb.Metric) ([]byte, error) {
 }
 
 func createMockCacheForEFS(t *testing.T) {
-	f, err := os.Create("./testdata/cache-AWS-EFS")
+	f, err := os.Create("./cache-AWS-EFS")
 	if err != nil {
 		t.Fatal(err)
 	}
