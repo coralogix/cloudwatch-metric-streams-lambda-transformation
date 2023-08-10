@@ -36,13 +36,14 @@ func main() {
 
 func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (interface{}, error) {
 	var (
-		logger        = newLogger(os.Getenv("LOG_LEVEL"))
-		region        = aws.String(os.Getenv("AWS_REGION"))
-		fileCachePath = os.Getenv("FILE_CACHE_PATH")
+		logger = newLogger(os.Getenv("LOG_LEVEL"))
+		region = aws.String(os.Getenv("AWS_REGION"))
 
 		// Set defaults and if the env var is set, override the default value.
 		continueOnResourceFailure = true
+		fileCacheEnabled          = true
 		fileCacheExpiration       = 1 * time.Hour
+		fileCachePath             = "/tmp"
 
 		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
 		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
@@ -53,6 +54,10 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		continueOnResourceFailure = false
 	}
 
+	if os.Getenv("FILE_CACHE_ENABLED") == "false" {
+		fileCacheEnabled = false
+	}
+
 	if os.Getenv("FILE_CACHE_EXPIRATION") != "" {
 		d, err := time.ParseDuration(os.Getenv("FILE_CACHE_EXPIRATION"))
 		if err != nil {
@@ -60,6 +65,10 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		} else {
 			fileCacheExpiration = d
 		}
+	}
+
+	if os.Getenv("FILE_CACHE_PATH") != "" {
+		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
 	cache, err := clientsv2.NewCache(config.ScrapeConf{
@@ -85,7 +94,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -106,9 +115,9 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration) ([]*model.TaggedResource, error) {
-	// If fileCachePath not set, don't cache.
-	if fileCachePath == "" {
+func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
+	// If cacheEnabled is false, don't cache.
+	if !cacheEnabled {
 		return retrieveResources(namespace, region, client)
 	}
 
@@ -190,6 +199,7 @@ func enhanceRecordData(
 	region *string,
 	client tagging.Client,
 	fileCacheExpiration time.Duration,
+	fileCacheEnabled bool,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -218,7 +228,7 @@ func enhanceRecordData(
 							}
 
 							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration)
+								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {

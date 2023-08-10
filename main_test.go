@@ -298,7 +298,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -366,7 +366,7 @@ func Test_getOrCacheResources(t *testing.T) {
 			mrg := mockResurcesGetter{
 				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
 			}
-			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour)
+			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour, true)
 			if err != nil {
 				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
 			}
