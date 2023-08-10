@@ -15,9 +15,9 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
     - Handler: `function`
     - Architecture: `x86_64` (but you can also build the function for `arm64`)
 3. Upload the `function.zip` file as the code source.
-4. Make sure to set the memory. We recommend starting with `128 MB` and see if you need to increase it based on the number of metrics
-5. Adjust the role of the Lambda function as described below in section [Necessary permissions](##Necessary_permissions).
-6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](##Configuration) section.
+4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processinr, see if you need to increase it.
+5. Adjust the role of the Lambda function as described below in section [Necessary permissions](###necessary-permissions).
+6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](###configuration) section.
 7. The Lambda function is ready to be used as in [Kinesis Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Kinesis Data Firehose configuration.
 
 ### Configuration
@@ -27,6 +27,8 @@ There is a couple of configuration options that can be set via environment varia
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
 | `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
+| `FILE_CACHE_PATH`                | not set | <file_path>      | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_EXPIRATION`          | `1h`    | <duration>       | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
 
 ### Necessary permissions
 The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
@@ -57,8 +59,15 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
 }
 ```
 
+### Caching resources
+Users, who do not wish to fetch resources from the AWS API on every Lambda invocation, can enable caching of resources to a local file. This can be especially useful for users with a large number of resources, in order to keep the Lambda invocation time low and at the same to avoid hitting the [resource tagging API](https://aws.amazon.com/blogs/aws/new-aws-resource-tagging-api/) rate limits. Beware though that any changes to resource tags will not be reflect in metrics until the cache expires and is renewed.
+
+Caching can be enabled by setting the `FILE_CACHE_PATH` environment variable to a path of the directory, where the resources will be cached. You can leverage Lambda's emphemeral storage by settings this siply to `/tmp`. This ensures that the resources will be cached between Lambda invocations on a single Lambda environment, meaning the cache will be reset when new Lambda environment is created. For more details on ephemeral storage and other storage options see [here](https://aws.amazon.com/blogs/compute/choosing-between-aws-lambda-data-storage-options-in-web-apps/).
+
+The resources will be cached for a period of time, which can be set by the `FILE_CACHE_EXPIRATION` environment variable. The expiration time can be set in the [Go duration format](https://golang.org/pkg/time/#ParseDuration). If the `FILE_CACHE_EXPIRATION` is not set, the resources will be cached for 1 hour by default.
+
 ## Extra costs and usage of AWS APIs
-There are couple of costs connected with usage of Lambda transformation. Below, these costs are described in details (based on examples and pricing in the US East region). This example assumes a user will be exporting metrics from all namespaces and that the metrics updates are coming once per minute (which is not true fro all AWS metrics, see [this thread](https://serverfault.com/questions/1003344/aws-cloudwatch-metrics-are-there-convergence-delays?newreg=80710344c54e4a8397eac3acfdb01941) to learn more). The example is based on a region with ~5000 metrics. For detailed pricing information see [here](https://aws.amazon.com/lambda/pricing/). This calculation is for informative purposes and it is valid as of March 2023 to the best of our knowledge.
+There are couple of costs connected with usage of Lambda transformation. Below, these costs are described in details (based on examples and pricing in the US East region). This example assumes a user will be exporting metrics from all namespaces and that the metrics updates are coming once per minute (which is not true for all AWS metrics, see [this thread](https://serverfault.com/questions/1003344/aws-cloudwatch-metrics-are-there-convergence-delays?newreg=80710344c54e4a8397eac3acfdb01941) to learn more). The example is based on a region with ~5000 metrics. For detailed pricing information see [here](https://aws.amazon.com/lambda/pricing/). This calculation is for informative purposes and it is valid as of March 2023 to the best of our knowledge.
 
 - The costs connected with Lambda
   - With assumed update every minute (accounting for 43,200 invocations per month), the costs for invocation (every 1,000,000 requests / 0.20 USD), comes to **0.01 USD**. 
