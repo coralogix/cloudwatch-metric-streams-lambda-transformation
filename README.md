@@ -20,6 +20,8 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
 6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](###configuration) section.
 7. The Lambda function is ready to be used as in [Kinesis Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Kinesis Data Firehose configuration.
 
+Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Kinesis Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinsis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
+
 ### Configuration
 There is a couple of configuration options that can be set via environment variables:
 
@@ -27,7 +29,8 @@ There is a couple of configuration options that can be set via environment varia
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
 | `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
-| `FILE_CACHE_PATH`                | not set | <file_path>      | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_PATH`                | `/tmp`  | <file_path>      | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
 | `FILE_CACHE_EXPIRATION`          | `1h`    | <duration>       | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
 
 ### Necessary permissions
@@ -60,7 +63,9 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
 ```
 
 ### Caching resources
-Users, who do not wish to fetch resources from the AWS API on every Lambda invocation, can enable caching of resources to a local file. This can be especially useful for users with a large number of resources, in order to keep the Lambda invocation time low and at the same to avoid hitting the [resource tagging API](https://aws.amazon.com/blogs/aws/new-aws-resource-tagging-api/) rate limits. Beware though that any changes to resource tags will not be reflect in metrics until the cache expires and is renewed.
+Users, who do not wish to fetch resources from the AWS API on every Lambda invocation, can take advantage of caching of resources to a local file. Caching is enabled by default; to disable it, set the `FILE_CACHE_ENABLED` environment variable to `false`.
+
+ This can be especially useful for users with a large number of resources, in order to keep the Lambda invocation time low and at the same to avoid hitting the [resource tagging API](https://aws.amazon.com/blogs/aws/new-aws-resource-tagging-api/) rate limits. Beware though that any changes to resource tags will not be reflect in metrics until the cache expires and is renewed.
 
 Caching can be enabled by setting the `FILE_CACHE_PATH` environment variable to a path of the directory, where the resources will be cached. You can leverage Lambda's emphemeral storage by settings this siply to `/tmp`. This ensures that the resources will be cached between Lambda invocations on a single Lambda environment, meaning the cache will be reset when new Lambda environment is created. For more details on ephemeral storage and other storage options see [here](https://aws.amazon.com/blogs/compute/choosing-between-aws-lambda-data-storage-options-in-web-apps/).
 
