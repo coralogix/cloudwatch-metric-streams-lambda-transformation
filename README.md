@@ -28,11 +28,10 @@ There is a couple of configuration options that can be set via environment varia
 | Environment variable             | Default |Possible values   | Description   |
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
-| `USE_NEW_ASSOCIATOR`             | `true`  | `false`          | Determines whether Lambda should fall back to the old associator algorithm. Be default Lambda uses the "max dimensions" associator. For more details see [here](https://github.com/nerdswords/yet-another-cloudwatch-exporter/blob/master/docs/feature_flags.md#new-associator-algorithm).
 | `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
 | `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_PATH`                | `/tmp`  | <file_path>      | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_EXPIRATION`          | `1h`    | <duration>       | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
 
 ### Necessary permissions
 The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:

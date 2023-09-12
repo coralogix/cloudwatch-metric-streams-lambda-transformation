@@ -18,7 +18,6 @@ import (
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/associator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
@@ -31,12 +30,6 @@ import (
 
 const cacheFile = "cache"
 
-// resoureAssociator is an interface used for associator. This is used in place
-// of the upstream interface which is not exported.
-type resourceAssociator interface {
-	AssociateMetricToResource(cwMetric *model.Metric) (*model.TaggedResource, bool)
-}
-
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -47,7 +40,6 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		region = aws.String(os.Getenv("AWS_REGION"))
 
 		// Set defaults and if the env var is set, override the default value.
-		useNewAssociator          = true
 		continueOnResourceFailure = true
 		fileCacheEnabled          = true
 		fileCacheExpiration       = 1 * time.Hour
@@ -64,10 +56,6 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 
 	if os.Getenv("FILE_CACHE_ENABLED") == "false" {
 		fileCacheEnabled = false
-	}
-
-	if os.Getenv("USE_NEW_ASSOCIATOR") == "false" {
-		useNewAssociator = false
 	}
 
 	if os.Getenv("FILE_CACHE_EXPIRATION") != "" {
@@ -106,7 +94,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, useNewAssociator, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -206,7 +194,6 @@ func enhanceRecordData(
 	logger logging.Logger,
 	fileCachePath string,
 	continueOnResourceFailure bool,
-	useNewAssociator bool,
 	data []byte,
 	resourceCache map[string][]*model.TaggedResource,
 	region *string,
@@ -253,13 +240,7 @@ func enhanceRecordData(
 								resourceCache[cwm.Namespace] = resources
 							}
 
-							var asc resourceAssociator
-							if useNewAssociator {
-								asc = maxdimassociator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
-							} else {
-								asc = associator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
-							}
-
+							asc := maxdimassociator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
 								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)

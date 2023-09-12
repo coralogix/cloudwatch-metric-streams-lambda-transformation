@@ -298,7 +298,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, true, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
