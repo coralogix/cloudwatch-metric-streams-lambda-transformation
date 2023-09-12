@@ -18,7 +18,7 @@ import (
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/associator"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -240,7 +240,7 @@ func enhanceRecordData(
 								resourceCache[cwm.Namespace] = resources
 							}
 
-							asc := associator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
+							asc := maxdimassociator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
 								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
