@@ -33,3 +33,9 @@ jobs:
 
       - name: Publish to S3
         run: make publish
+
+      - name: Create a draft release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          files: function.zip
