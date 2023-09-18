@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/sirupsen/logrus"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -71,7 +70,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
-	cache, err := clientsv2.NewCache(config.ScrapeConf{
+	cache, err := clientsv2.NewFactory(config.ScrapeConf{
 		Discovery: config.Discovery{
 			Jobs: []*config.Job{
 				{
@@ -240,7 +239,7 @@ func enhanceRecordData(
 								resourceCache[cwm.Namespace] = resources
 							}
 
-							asc := maxdimassociator.NewAssociator(svc.DimensionRegexps, resourceCache[cwm.Namespace])
+							asc := maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
 								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -330,15 +329,5 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 }
 
 func newLogger(level string) logging.Logger {
-	l := logrus.New()
-	l.SetFormatter(&logrus.JSONFormatter{})
-	l.SetOutput(os.Stdout)
-
-	if strings.ToLower(level) == "debug" {
-		l.SetLevel(logrus.DebugLevel)
-	} else {
-		l.SetLevel(logrus.InfoLevel)
-	}
-
-	return logging.NewLogger(l)
+	return logging.NewLogger("json", level == "debug")
 }
