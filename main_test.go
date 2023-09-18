@@ -290,6 +290,7 @@ func Test_enhanceRecordData(t *testing.T) {
 			nil,
 			nil,
 			nil,
+			nil,
 		)
 
 		t.Run(tt.name, func(t *testing.T) {
