@@ -9,7 +9,7 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
 - Returns Kinesis Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Kinesis stream
 
 ### Installation and usage
-1. Test, lint and build the zipped Lambda function by running `make all`.
+1. Download the `function.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Go 1.x`
     - Handler: `function`
