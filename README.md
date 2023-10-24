@@ -9,18 +9,21 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
 - Returns Kinesis Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Kinesis stream
 
 ### Installation and usage
-1. Download the `function.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
+1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
-    - Runtime: `Go 1.x`
-    - Handler: `function`
-    - Architecture: `x86_64` (but you can also build the function for `arm64`)
-3. Upload the `function.zip` file as the code source.
+    - Runtime: `Custom runtime on Amazon Linux 2`
+    - Handler: `bootstrap`
+    - Architecture: `arm64` (but you can also build the function for `x86_64`)
+3. Upload the `bootstrap.zip` file as the code source.
 4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processinr, see if you need to increase it.
 5. Adjust the role of the Lambda function as described below in section [Necessary permissions](###necessary-permissions).
 6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](###configuration) section.
 7. The Lambda function is ready to be used as in [Kinesis Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Kinesis Data Firehose configuration.
 
 Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Kinesis Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinsis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
+
+## Migrating from `Go 1.x` runtime to custom runtime on Amazon Linux 2
+Please beware that the `Go 1.x` runtime will be [deprecated](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/) at the end of December 2023. If you were previously using this Lambda function with the `Go 1.x`, you will need to migrate the function in accordance with the instructions in the [AWS documentation](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/).
 
 ### Configuration
 There is a couple of configuration options that can be set via environment variables:
