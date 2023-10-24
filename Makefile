@@ -1,7 +1,7 @@
-BINARY_FILE_NAME ?= "function"
-ZIP_FILE_NAME ?= "function.zip"
+BINARY_FILE_NAME ?= "bootstrap"
+ZIP_FILE_NAME ?= "bootstrap.zip"
 ## By default, build for Linux on amd64, as that's the Lambda architecture we'll be using.
-ARCH ?= "amd64"
+ARCH ?= "arm64"
 OS ?= "linux"
 
 ## The final bucket name will consist of BUCKET_BASE_NAME and the region name, in format <BUCKET_BASE_NAME>-<region>.
