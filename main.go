@@ -70,19 +70,17 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
-	cache, err := clientsv2.NewFactory(config.ScrapeConf{
-		Discovery: config.Discovery{
-			Jobs: []*config.Job{
-				{
-					Regions: []string{*region},
-					// We need to declare the empty role, otherwise
-					// the cache setup for APIs will panic. This will force it
-					// to use the default IAM provided by Lambda.
-					Roles: []config.Role{{}},
-				},
+	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
+		DiscoveryJobs: []model.DiscoveryJob{
+			{
+				Regions: []string{*region},
+				// We need to declare the empty role, otherwise
+				// the cache setup for APIs will panic. This will force it
+				// to use the default IAM provided by Lambda.
+				Roles: []model.Role{{}},
 			},
 		},
-	}, false, logger)
+	}, false)
 	if err != nil {
 		logger.Error(err, "Failed to create a new cache client")
 		return nil, err
@@ -90,7 +88,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	cache.Refresh()
 
 	// For now use the same concurrency as upstream implementation.
-	clientTag := cache.GetTaggingClient(*region, config.Role{}, 5)
+	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
 
 	for _, record := range request.Records {
 		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
@@ -177,7 +175,7 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, file
 }
 
 func retrieveResources(namespace string, region *string, client tagging.Client) ([]*model.TaggedResource, error) {
-	resources, err := client.GetResources(context.Background(), &config.Job{
+	resources, err := client.GetResources(context.Background(), model.DiscoveryJob{
 		Type: namespace,
 	}, *region)
 	if err != nil && err != tagging.ErrExpectedToFindResources {

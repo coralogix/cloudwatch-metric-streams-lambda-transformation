@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -407,7 +406,7 @@ type mockResurcesGetter struct {
 	mockResources []*model.TaggedResource
 }
 
-func (m mockResurcesGetter) GetResources(ctx context.Context, job *config.Job, region string) ([]*model.TaggedResource, error) {
+func (m mockResurcesGetter) GetResources(ctx context.Context, job model.DiscoveryJob, region string) ([]*model.TaggedResource, error) {
 	return m.mockResources, nil
 }
 
