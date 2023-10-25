@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - '**.go'
+      - 'go.mod'
+      - 'Makefile'
 
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
