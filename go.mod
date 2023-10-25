@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-lambda-go v1.38.0
 	github.com/aws/aws-sdk-go v1.45.7
 	github.com/matttproud/golang_protobuf_extensions/v2 v2.0.0
-	github.com/nerdswords/yet-another-cloudwatch-exporter v0.51.1-0.20230524130052-695c1ebe6450
+	github.com/nerdswords/yet-another-cloudwatch-exporter v0.55.0
 	go.opentelemetry.io/proto/otlp v0.7.0
 )
 
@@ -56,6 +56,3 @@ require (
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-// TODO: This is temporary until the change to make metrics associator public is proposed in the upstream.
-replace github.com/nerdswords/yet-another-cloudwatch-exporter => github.com/matej-g/yet-another-cloudwatch-exporter v0.48.0-alpha.0.20230914080557-6980fb9a9dbd
