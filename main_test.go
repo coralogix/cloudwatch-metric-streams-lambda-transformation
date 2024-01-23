@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -22,6 +23,140 @@ import (
 )
 
 var mockServerError = errors.New("Failed to get resources")
+
+func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
+	num := 1234567890
+	for i := 0; i < n; i++ {
+		metrics = append(metrics, &metricspb.Metric{
+			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
+			Unit: "Bytes",
+			Data: &metricspb.Metric_DoubleSummary{
+				DoubleSummary: &metricspb.DoubleSummary{
+					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+						{
+							Labels: []*commonpb.StringKeyValue{
+								{
+									Key:   "MetricName",
+									Value: "VolumeWriteBytes",
+								},
+								{
+									Key:   "Namespace",
+									Value: "AWS/EBS",
+								},
+								{
+									Key:   "VolumeId",
+									Value: fmt.Sprintf("vol-%d", num+i),
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	for i := 0; i < n; i++ {
+		resourceTagMapping = append(resourceTagMapping, &resourcegroupstaggingapi.ResourceTagMapping{
+			ResourceARN: aws.String(fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:volume/vol-%d", num+i)),
+			Tags: []*resourcegroupstaggingapi.Tag{
+				{
+					Key:   aws.String("Name"),
+					Value: aws.String("test-instance"),
+				},
+				{
+					Key:   aws.String("team"),
+					Value: aws.String("test-team-1"),
+				},
+				{
+					Key:   aws.String("env"),
+					Value: aws.String("testing"),
+				},
+			},
+		})
+	}
+
+	for i := 0; i < n; i++ {
+		wanted = append(wanted, &metricspb.Metric{
+			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
+			Unit: "Bytes",
+			Data: &metricspb.Metric_DoubleSummary{
+				DoubleSummary: &metricspb.DoubleSummary{
+					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+						{
+							Labels: []*commonpb.StringKeyValue{
+								{
+									Key:   "MetricName",
+									Value: "VolumeWriteBytes",
+								},
+								{
+									Key:   "Namespace",
+									Value: "AWS/EBS",
+								},
+								{
+									Key:   "VolumeId",
+									Value: fmt.Sprintf("vol-%d", num+i),
+								},
+								{
+									Key:   "Name",
+									Value: "test-instance",
+								},
+								{
+									Key:   "team",
+									Value: "test-team-1",
+								},
+								{
+									Key:   "env",
+									Value: "testing",
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	return
+}
+
+func Test_enhanceRecordData_NMetrics(t *testing.T) {
+	testMetrics, resourceTagMapping, wantMetrics := generateMetrics(8000)
+
+	l := logging.NewNopLogger()
+	mockCache := make(map[string][]*model.TaggedResource)
+	mockClient := taggingv1.NewClient(
+		l,
+		mockResourceGroupsTaggingAPIClient{mockError: nil, tagMapping: resourceTagMapping},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	data, err := createTestDataFromMetrics(testMetrics)
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	got, err := enhanceRecordData(l, "", false, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+	if err != nil {
+		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
+		return
+	}
+
+	want, err := createTestDataFromMetrics(wantMetrics)
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("enhanceRecordData() = %v, want %v", got, want)
+	}
+}
 
 func Test_enhanceRecordData(t *testing.T) {
 	testCases := []struct {

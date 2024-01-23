@@ -202,6 +202,7 @@ func enhanceRecordData(
 	if err != nil {
 		return nil, err
 	}
+	ascMap := make(map[string]maxdimassociator.Associator)
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
@@ -237,7 +238,13 @@ func enhanceRecordData(
 								resourceCache[cwm.Namespace] = resources
 							}
 
-							asc := maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
+							asc, ok := ascMap[cwm.Namespace]
+							if !ok {
+								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
+								asc = maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
+								ascMap[cwm.Namespace] = asc
+							}
+
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
 								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
