@@ -46,8 +46,9 @@ s3-check-or-create-buckets:
 	@{ \
 	set -e ; \
 	for r in $(REGIONS); do \
+		echo "Checking for existence of bucket in $$r"; \
 		EXISTS_RESULT=$$(aws s3api head-bucket --region $$r --bucket "${BUCKET_BASE_NAME}-$$r" 2>&1	) || true; \
-		if [ "$$EXISTS_RESULT" != "" ]; then \
+		if !(echo "$$EXISTS_RESULT" | grep -q $$r); then \
 			if (echo $$EXISTS_RESULT | grep -q "404"); then \
 				echo "Bucket not found in $$r, creating" ; \
 				if [ "$$r" = "us-east-1" ]; then \
