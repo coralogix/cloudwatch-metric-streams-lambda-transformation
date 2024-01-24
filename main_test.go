@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -22,7 +23,7 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-var mockServerError = errors.New("Failed to get resources")
+var errMockServerError = errors.New("failed to get resources")
 
 func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
 	num := 1234567890
@@ -123,7 +124,8 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 	testMetrics, resourceTagMapping, wantMetrics := generateMetrics(8000)
 
 	l := logging.NewNopLogger()
-	mockCache := make(map[string][]*model.TaggedResource)
+	mockResourcesCache := make(map[string][]*model.TaggedResource)
+	mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 	mockClient := taggingv1.NewClient(
 		l,
 		mockResourceGroupsTaggingAPIClient{mockError: nil, tagMapping: resourceTagMapping},
@@ -142,7 +144,7 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 		t.Fatalf("failed to create test data: %v", err)
 	}
 
-	got, err := enhanceRecordData(l, "", false, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+	got, err := enhanceRecordData(l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
 	if err != nil {
 		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
 		return
@@ -287,7 +289,7 @@ func Test_enhanceRecordData(t *testing.T) {
 					},
 				},
 			},
-			wantErr: mockServerError,
+			wantErr: errMockServerError,
 		},
 		{
 			name: "With no resources found error (AWS/EBS), but continue (without 'continue on resource failure' flag)",
@@ -413,7 +415,8 @@ func Test_enhanceRecordData(t *testing.T) {
 
 	for _, tt := range testCases {
 		l := logging.NewNopLogger()
-		mockCache := make(map[string][]*model.TaggedResource)
+		mockResourcesCache := make(map[string][]*model.TaggedResource)
+		mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 		mockClient := taggingv1.NewClient(
 			l,
 			mockResourceGroupsTaggingAPIClient{mockError: tt.wantErr, tagMapping: tt.resourceTagMapping},
@@ -433,7 +436,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return

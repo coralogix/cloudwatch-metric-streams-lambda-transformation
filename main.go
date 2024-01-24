@@ -44,8 +44,9 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCacheExpiration       = 1 * time.Hour
 		fileCachePath             = "/tmp"
 
-		resourcesPerNamespace = make(map[string][]*model.TaggedResource)
-		responseRecords       = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
+		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
+		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
+		responseRecords         = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
 
 	// Override the default continueOnResourceFailure value if the env var is set.
@@ -91,7 +92,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -193,6 +194,7 @@ func enhanceRecordData(
 	continueOnResourceFailure bool,
 	data []byte,
 	resourceCache map[string][]*model.TaggedResource,
+	associatorCache map[string]maxdimassociator.Associator,
 	region *string,
 	client tagging.Client,
 	fileCacheExpiration time.Duration,
@@ -202,7 +204,6 @@ func enhanceRecordData(
 	if err != nil {
 		return nil, err
 	}
-	ascMap := make(map[string]maxdimassociator.Associator)
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
@@ -238,11 +239,11 @@ func enhanceRecordData(
 								resourceCache[cwm.Namespace] = resources
 							}
 
-							asc, ok := ascMap[cwm.Namespace]
+							asc, ok := associatorCache[cwm.Namespace]
 							if !ok {
 								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
 								asc = maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
-								ascMap[cwm.Namespace] = asc
+								associatorCache[cwm.Namespace] = asc
 							}
 
 							r, skip := asc.AssociateMetricToResource(cwm)
