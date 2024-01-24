@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -21,7 +23,142 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-var mockServerError = errors.New("Failed to get resources")
+var errMockServerError = errors.New("failed to get resources")
+
+func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
+	num := 1234567890
+	for i := 0; i < n; i++ {
+		metrics = append(metrics, &metricspb.Metric{
+			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
+			Unit: "Bytes",
+			Data: &metricspb.Metric_DoubleSummary{
+				DoubleSummary: &metricspb.DoubleSummary{
+					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+						{
+							Labels: []*commonpb.StringKeyValue{
+								{
+									Key:   "MetricName",
+									Value: "VolumeWriteBytes",
+								},
+								{
+									Key:   "Namespace",
+									Value: "AWS/EBS",
+								},
+								{
+									Key:   "VolumeId",
+									Value: fmt.Sprintf("vol-%d", num+i),
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	for i := 0; i < n; i++ {
+		resourceTagMapping = append(resourceTagMapping, &resourcegroupstaggingapi.ResourceTagMapping{
+			ResourceARN: aws.String(fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:volume/vol-%d", num+i)),
+			Tags: []*resourcegroupstaggingapi.Tag{
+				{
+					Key:   aws.String("Name"),
+					Value: aws.String("test-instance"),
+				},
+				{
+					Key:   aws.String("team"),
+					Value: aws.String("test-team-1"),
+				},
+				{
+					Key:   aws.String("env"),
+					Value: aws.String("testing"),
+				},
+			},
+		})
+	}
+
+	for i := 0; i < n; i++ {
+		wanted = append(wanted, &metricspb.Metric{
+			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
+			Unit: "Bytes",
+			Data: &metricspb.Metric_DoubleSummary{
+				DoubleSummary: &metricspb.DoubleSummary{
+					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+						{
+							Labels: []*commonpb.StringKeyValue{
+								{
+									Key:   "MetricName",
+									Value: "VolumeWriteBytes",
+								},
+								{
+									Key:   "Namespace",
+									Value: "AWS/EBS",
+								},
+								{
+									Key:   "VolumeId",
+									Value: fmt.Sprintf("vol-%d", num+i),
+								},
+								{
+									Key:   "Name",
+									Value: "test-instance",
+								},
+								{
+									Key:   "team",
+									Value: "test-team-1",
+								},
+								{
+									Key:   "env",
+									Value: "testing",
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	return
+}
+
+func Test_enhanceRecordData_NMetrics(t *testing.T) {
+	testMetrics, resourceTagMapping, wantMetrics := generateMetrics(8000)
+
+	l := logging.NewNopLogger()
+	mockResourcesCache := make(map[string][]*model.TaggedResource)
+	mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
+	mockClient := taggingv1.NewClient(
+		l,
+		mockResourceGroupsTaggingAPIClient{mockError: nil, tagMapping: resourceTagMapping},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	data, err := createTestDataFromMetrics(testMetrics)
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	got, err := enhanceRecordData(l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+	if err != nil {
+		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
+		return
+	}
+
+	want, err := createTestDataFromMetrics(wantMetrics)
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("enhanceRecordData() = %v, want %v", got, want)
+	}
+}
 
 func Test_enhanceRecordData(t *testing.T) {
 	testCases := []struct {
@@ -152,7 +289,7 @@ func Test_enhanceRecordData(t *testing.T) {
 					},
 				},
 			},
-			wantErr: mockServerError,
+			wantErr: errMockServerError,
 		},
 		{
 			name: "With no resources found error (AWS/EBS), but continue (without 'continue on resource failure' flag)",
@@ -278,7 +415,8 @@ func Test_enhanceRecordData(t *testing.T) {
 
 	for _, tt := range testCases {
 		l := logging.NewNopLogger()
-		mockCache := make(map[string][]*model.TaggedResource)
+		mockResourcesCache := make(map[string][]*model.TaggedResource)
+		mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 		mockClient := taggingv1.NewClient(
 			l,
 			mockResourceGroupsTaggingAPIClient{mockError: tt.wantErr, tagMapping: tt.resourceTagMapping},
@@ -298,7 +436,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
