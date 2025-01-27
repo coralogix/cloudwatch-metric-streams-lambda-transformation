@@ -2,8 +2,13 @@ name: publish
 
 on:
   push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'Makefile'
+  workflow_dispatch:
 
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
