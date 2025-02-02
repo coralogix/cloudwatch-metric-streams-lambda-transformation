@@ -10,6 +10,10 @@ on:
       - 'Makefile'
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
 
@@ -29,11 +33,10 @@ jobs:
       - name: Build and package
         run: make package
 
-      - name: Setup credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.S3_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Publish to S3
