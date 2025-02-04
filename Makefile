@@ -56,6 +56,11 @@ s3-check-or-create-buckets:
 				else \
 					aws s3api create-bucket --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r --create-bucket-configuration LocationConstraint=$$r > /dev/null 2>&1; \
 				fi; \
+				aws s3api put-public-access-block --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r \
+					--public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"; \
+				aws s3api put-bucket-ownership-controls --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r \
+					--ownership-controls="Rules=[{ObjectOwnership=ObjectWriter}]"; \
+				aws s3api put-bucket-acl --bucket "${BUCKET_BASE_NAME}-$$r" --region $$r --acl public-read; \
 			else \
 				echo "Unknown error - ${EXISTS_RESULT}  - occured in $$r, exiting" ; \
 				exit 1; \
