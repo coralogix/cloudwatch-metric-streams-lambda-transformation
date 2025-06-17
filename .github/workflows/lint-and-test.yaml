@@ -17,13 +17,15 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v3
         with:
-          go-version: 1.21.x
+          go-version: 1.24.x
+        env:
+          GOTOOLCHAIN: local
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v7
         with:
           # Required: the version of golangci-lint is required and must be specified without patch version: we always use the latest patch version.
-          version: v1.54
+          version: v2.1.6
           args: --timeout=5m
 
   test:
@@ -36,7 +38,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v3
         with:
-          go-version: 1.21.x
+          go-version: 1.24.x
+        env:
+          GOTOOLCHAIN: local
 
       - name: Run tests
         run: make test
