@@ -18,6 +18,8 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: 1.24.x
+        env:
+          GOTOOLCHAIN: local
 
       - name: Lint
         uses: golangci/golangci-lint-action@v3
@@ -37,6 +39,8 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: 1.24.x
+        env:
+          GOTOOLCHAIN: local
 
       - name: Run tests
         run: make test
