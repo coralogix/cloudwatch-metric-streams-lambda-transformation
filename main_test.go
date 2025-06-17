@@ -484,7 +484,9 @@ func Test_getOrCacheResources(t *testing.T) {
 
 	createMockCacheForEFS(t)
 	t.Cleanup(func() {
-		os.Remove("./cache-AWS-EFS")
+		if err := os.Remove("./cache-AWS-EFS"); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("failed to remove ./cache-AWS-EFS: %v", err)
+		}
 	})
 
 	for _, tc := range testCases {
@@ -497,7 +499,9 @@ func Test_getOrCacheResources(t *testing.T) {
 				}
 
 				t.Cleanup(func() {
-					os.Remove(tc.wantCreatedFile)
+					if err := os.Remove(tc.wantCreatedFile); err != nil && !os.IsNotExist(err) {
+						t.Fatalf("failed to remove %s: %v", tc.wantCreatedFile, err)
+					}
 				})
 			}
 
