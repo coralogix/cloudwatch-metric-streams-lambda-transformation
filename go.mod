@@ -2,8 +2,6 @@ module github.com/coralogix/cloudwatch-streams-lambda-enhancement
 
 go 1.23.0
 
-toolchain go1.24.4
-
 require (
 	github.com/aws/aws-lambda-go v1.38.0
 	github.com/aws/aws-sdk-go v1.46.2
