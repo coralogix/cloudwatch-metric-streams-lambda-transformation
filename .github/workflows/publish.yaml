@@ -2,12 +2,12 @@ name: publish
 
 on:
   push:
-    # branches:
-    #   - main
-    # paths:
-    #   - '**.go'
-    #   - 'go.mod'
-    #   - 'Makefile'
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'Makefile'
   workflow_dispatch:
 
 permissions:
