@@ -2,17 +2,17 @@ name: publish
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'Makefile'
+    # branches:
+    #   - main
+    # paths:
+    #   - '**.go'
+    #   - 'go.mod'
+    #   - 'Makefile'
   workflow_dispatch:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 env:
   BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
