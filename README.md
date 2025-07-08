@@ -1,4 +1,8 @@
- # CloudWatch Metric Streams Lambda transformation
+Compass Changes 7/8:
+- Support OLTP v1.0
+- Provide a list of tags that will be copied to metrics; skipping the rest
+
+# CloudWatch Metric Streams Lambda transformation
 
 ## About The Project
 This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.

@@ -23,6 +23,15 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
+func kv(k, v string) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key: k,
+		Value: &commonpb.AnyValue{
+			Value: &commonpb.AnyValue_StringValue{StringValue: v},
+		},
+	}
+}
+
 var errMockServerError = errors.New("failed to get resources")
 
 func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
@@ -31,23 +40,14 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 		metrics = append(metrics, &metricspb.Metric{
 			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
 			Unit: "Bytes",
-			Data: &metricspb.Metric_DoubleSummary{
-				DoubleSummary: &metricspb.DoubleSummary{
-					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+			Data: &metricspb.Metric_Summary{
+				Summary: &metricspb.Summary{
+					DataPoints: []*metricspb.SummaryDataPoint{
 						{
-							Labels: []*commonpb.StringKeyValue{
-								{
-									Key:   "MetricName",
-									Value: "VolumeWriteBytes",
-								},
-								{
-									Key:   "Namespace",
-									Value: "AWS/EBS",
-								},
-								{
-									Key:   "VolumeId",
-									Value: fmt.Sprintf("vol-%d", num+i),
-								},
+							Attributes: []*commonpb.KeyValue{
+								kv("MetricName", "VolumeWriteBytes"),
+								kv("Namespace", "AWS/EBS"),
+								kv("VolumeId", fmt.Sprintf("vol-%d", num+i)),
 							},
 						},
 					},
@@ -65,11 +65,11 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 					Value: aws.String("test-instance"),
 				},
 				{
-					Key:   aws.String("team"),
+					Key:   aws.String("compass:cost-mgmt:team-name"),
 					Value: aws.String("test-team-1"),
 				},
 				{
-					Key:   aws.String("env"),
+					Key:   aws.String("compass:automation:environment"),
 					Value: aws.String("testing"),
 				},
 			},
@@ -80,35 +80,17 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 		wanted = append(wanted, &metricspb.Metric{
 			Name: "amazonaws.com/AWS/EBS/VolumeWriteByte",
 			Unit: "Bytes",
-			Data: &metricspb.Metric_DoubleSummary{
-				DoubleSummary: &metricspb.DoubleSummary{
-					DataPoints: []*metricspb.DoubleSummaryDataPoint{
+			Data: &metricspb.Metric_Summary{
+				Summary: &metricspb.Summary{
+					DataPoints: []*metricspb.SummaryDataPoint{
 						{
-							Labels: []*commonpb.StringKeyValue{
-								{
-									Key:   "MetricName",
-									Value: "VolumeWriteBytes",
-								},
-								{
-									Key:   "Namespace",
-									Value: "AWS/EBS",
-								},
-								{
-									Key:   "VolumeId",
-									Value: fmt.Sprintf("vol-%d", num+i),
-								},
-								{
-									Key:   "Name",
-									Value: "test-instance",
-								},
-								{
-									Key:   "team",
-									Value: "test-team-1",
-								},
-								{
-									Key:   "env",
-									Value: "testing",
-								},
+							Attributes: []*commonpb.KeyValue{
+								kv("MetricName", "VolumeWriteBytes"),
+								kv("Namespace", "AWS/EBS"),
+								kv("VolumeId", fmt.Sprintf("vol-%d", num+i)),
+								kv("Name", "test-instance"),
+								kv("team", "test-team-1"),
+								kv("env", "testing"),
 							},
 						},
 					},
@@ -175,23 +157,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},
@@ -208,11 +181,11 @@ func Test_enhanceRecordData(t *testing.T) {
 							Value: aws.String("test-instance"),
 						},
 						{
-							Key:   aws.String("team"),
+							Key:   aws.String("compass:cost-mgmt:team-name"),
 							Value: aws.String("test-team-1"),
 						},
 						{
-							Key:   aws.String("env"),
+							Key:   aws.String("compass:automation:environment"),
 							Value: aws.String("testing"),
 						},
 					},
@@ -222,35 +195,17 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
-										{
-											Key:   "Name",
-											Value: "test-instance",
-										},
-										{
-											Key:   "team",
-											Value: "test-team-1",
-										},
-										{
-											Key:   "env",
-											Value: "testing",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
+										kv("Name", "test-instance"),
+										kv("team", "test-team-1"),
+										kv("env", "testing"),
 									},
 								},
 							},
@@ -265,23 +220,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},
@@ -297,23 +243,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},
@@ -326,23 +263,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},
@@ -357,23 +285,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},
@@ -385,23 +304,14 @@ func Test_enhanceRecordData(t *testing.T) {
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
 					Unit: "Bytes",
-					Data: &metricspb.Metric_DoubleSummary{
-						DoubleSummary: &metricspb.DoubleSummary{
-							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
 								{
-									Labels: []*commonpb.StringKeyValue{
-										{
-											Key:   "MetricName",
-											Value: "VolumeWriteBytes",
-										},
-										{
-											Key:   "Namespace",
-											Value: "AWS/EBS",
-										},
-										{
-											Key:   "VolumeId",
-											Value: "vol-0123456789",
-										},
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
 									},
 								},
 							},

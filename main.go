@@ -29,6 +29,15 @@ import (
 
 const cacheFile = "cache"
 
+var validTagMap = map[string]string{
+	"compass:automation:managed-by":  "managed_by",
+	"compass:automation:environment": "env",
+	"compass:cost-mgmt:group-name":   "group",
+	"compass:cost-mgmt:team-name":    "team",
+	"compass:cost-mgmt:service-name": "service",
+	"Name":                           "Name",
+}
+
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -212,9 +221,9 @@ func enhanceRecordData(
 					switch t := metric.Data.(type) {
 					// All CloudWatch metrics are exported as summary, we therefore don't need to
 					// currently handle other types.
-					case *metricspb.Metric_DoubleSummary:
-						for _, dp := range t.DoubleSummary.DataPoints {
-							cwm := buildCloudWatchMetric(dp.Labels)
+					case *metricspb.Metric_Summary:
+						for _, dp := range t.Summary.DataPoints {
+							cwm := buildCloudWatchMetric(dp.Attributes)
 							logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -257,9 +266,13 @@ func enhanceRecordData(
 							}
 
 							for _, tag := range r.Tags {
-								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
-									Key:   tag.Key,
-									Value: tag.Value,
+								tagKey, ok := validTagMap[tag.Key]
+								if !ok {
+									continue
+								}
+								dp.Attributes = append(dp.Attributes, &commonpb.KeyValue{
+									Key:   tagKey,
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
 								})
 							}
 						}
@@ -275,24 +288,26 @@ func enhanceRecordData(
 }
 
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
-// usage in the metrics associatior.
-func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *model.Metric {
+// usage in the metrics associater.
+func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
 	cwm := &model.Metric{}
-
-	for _, l := range ll {
-		switch l.Key {
+	for _, kv := range attrs {
+		var val string
+		if kv.Value != nil {
+			val = kv.Value.GetStringValue()
+		}
+		switch kv.Key {
 		case "MetricName":
-			cwm.MetricName = l.Value
+			cwm.MetricName = val
 		case "Namespace":
-			cwm.Namespace = l.Value
+			cwm.Namespace = val
 		default:
 			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
-				Name:  l.Key,
-				Value: l.Value,
+				Name:  kv.Key,
+				Value: val,
 			})
 		}
 	}
-
 	return cwm
 }
 
