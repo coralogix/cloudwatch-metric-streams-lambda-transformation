@@ -1,15 +1,16 @@
- # CloudWatch Metric Streams Lambda transformation
+# CloudWatch Metric Streams Lambda transformation
 
 ## About The Project
 This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.
 
-- Accepts Kinesis Firehose events with metric data in [OTLP v0.7, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html)
+- Accepts Kinesis Firehose events with metric data in [OTLP v1.0, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry-100.html)
 - Obtains AWS resource information through the [AWS tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/overview.html) and related APIs (API Gateway, EC2...)
+- Supports a map of tag keys that will be copied to metrics; skipping the rest
 - Associates CloudWatch metrics with particular resources and enriches the metric labels with resource tags, based on the [Yet Another CloudWatch Exporter](https://github.com/nerdswords/yet-another-cloudwatch-exporter) library
-- Returns Kinesis Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Kinesis stream
+- Returns Kinesis Firehose response with transformed record in OTLP v1.0, size-delimited format, for further processing and exporting to Chronopshere (or other) destination by the Kinesis stream
 
 ### Installation and usage
-1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
+1. Download the `bootstrap.zip` file from the [releases](https://github.com/UrbanCompass/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Custom runtime on Amazon Linux 2`
     - Handler: `bootstrap`
@@ -28,13 +29,14 @@ Please beware that the `Go 1.x` runtime will be [deprecated](https://aws.amazon.
 ### Configuration
 There is a couple of configuration options that can be set via environment variables:
 
-| Environment variable             | Default |Possible values   | Description   |
-|----------------------------------|---------|------------------|---------------|
-| `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
-| `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
-| `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| Environment variable                | Default | Possible values                 | Description                                                                                                                                                                                                                                                                                        |
+|-------------------------------------|---------|---------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `LOG_LEVEL`                         | `info`  | `debug`                         | Sets log level.                                                                                                                                                                                                                                                                                    
+| `CONTINUE_ON_RESOURCE_FAILURE`      | `true`  | `false`                         | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose. 
+| `FILE_CACHE_ENABLED`                | `true`  | `false`                         | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.                                                                                                                                                                                        
+| `FILE_CACHE_PATH`                   | `/tmp`  | `<file_path>`                   | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.                                                                                                                                                                               
+| `FILE_CACHE_EXPIRATION`             | `1h`    | `<duration>`                    | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.                                                                                                                                                                                 
+| `VALID_AWS_TAG_KEYS_TO_METRIC_KEYS` |         | `<aws_key1>~<metric_key1>\|...` | If not provided, all AWS tags from the resource corresponding to the metric will be copied to the metric. To filter the tags that are copied to each metric, provide a pipe delimited series of AWS tag key to (~) metric tag key.                                                                                                                                                                                                .
 
 ### Necessary permissions
 The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:

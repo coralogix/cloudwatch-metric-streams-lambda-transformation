@@ -44,6 +44,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCacheExpiration       = 1 * time.Hour
 		fileCachePath             = "/tmp"
 
+		validTagMap             = make(map[string]string)
 		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
 		responseRecords         = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
@@ -71,6 +72,11 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
+	if os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS") != "" {
+		validTagMapString := os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS")
+		validTagMap = makeValidTags(validTagMapString)
+	}
+
 	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
@@ -92,7 +98,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, validTagMap)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -199,6 +205,7 @@ func enhanceRecordData(
 	client tagging.Client,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
+	validTagMap map[string]string,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -212,9 +219,9 @@ func enhanceRecordData(
 					switch t := metric.Data.(type) {
 					// All CloudWatch metrics are exported as summary, we therefore don't need to
 					// currently handle other types.
-					case *metricspb.Metric_DoubleSummary:
-						for _, dp := range t.DoubleSummary.DataPoints {
-							cwm := buildCloudWatchMetric(dp.Labels)
+					case *metricspb.Metric_Summary:
+						for _, dp := range t.Summary.DataPoints {
+							cwm := buildCloudWatchMetric(dp.Attributes)
 							logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -257,9 +264,13 @@ func enhanceRecordData(
 							}
 
 							for _, tag := range r.Tags {
-								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
-									Key:   tag.Key,
-									Value: tag.Value,
+								tagKey, ok := validTagMap[tag.Key]
+								if !ok {
+									continue
+								}
+								dp.Attributes = append(dp.Attributes, &commonpb.KeyValue{
+									Key:   tagKey,
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
 								})
 							}
 						}
@@ -275,24 +286,40 @@ func enhanceRecordData(
 }
 
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
-// usage in the metrics associatior.
-func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *model.Metric {
+// usage in the metrics associater.
+func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
 	cwm := &model.Metric{}
-
-	for _, l := range ll {
-		switch l.Key {
+	for _, kv := range attrs {
+		var val string
+		if kv.Value != nil {
+			val = kv.Value.GetStringValue()
+		}
+		switch kv.Key {
 		case "MetricName":
-			cwm.MetricName = l.Value
+			cwm.MetricName = val
 		case "Namespace":
-			cwm.Namespace = l.Value
+			cwm.Namespace = val
+		case "Dimensions":
+			if kv.Value != nil {
+				dimensions := kv.Value.GetKvlistValue()
+				if dimensions != nil {
+					for _, keyValue := range dimensions.GetValues() {
+						if keyValue.GetValue() != nil {
+							cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+								Name:  keyValue.Key,
+								Value: keyValue.GetValue().GetStringValue(),
+							})
+						}
+					}
+				}
+			}
 		default:
 			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
-				Name:  l.Key,
-				Value: l.Value,
+				Name:  kv.Key,
+				Value: val,
 			})
 		}
 	}
-
 	return cwm
 }
 
@@ -336,4 +363,20 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 
 func newLogger(level string) logging.Logger {
 	return logging.NewLogger("json", level == "debug")
+}
+
+func makeValidTags(validTagMapString string) map[string]string {
+	validTagMap := make(map[string]string)
+	pairs := strings.Split(validTagMapString, "|")
+	for _, pair := range pairs {
+		if !strings.Contains(pair, "~") {
+			continue
+		}
+		keyVal := strings.Split(pair, "~")
+		if len(keyVal) != 2 || keyVal[0] == "" || keyVal[1] == "" {
+			continue
+		}
+		validTagMap[keyVal[0]] = keyVal[1]
+	}
+	return validTagMap
 }
