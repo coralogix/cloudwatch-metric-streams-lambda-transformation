@@ -35,7 +35,7 @@ vet:
 
 .PHONY: build
 build:
-	GOOS=${OS} GOARCH=${ARCH} CGO_ENABLED=0 go build -ldflags="-s -w" -o ${BINARY_FILE_NAME} .
+	GOOS=${OS} GOARCH=${ARCH} CGO_ENABLED=0 go build -mod=mod -ldflags="-s -w" -o ${BINARY_FILE_NAME} .
 
 .PHONY: zip
 zip:

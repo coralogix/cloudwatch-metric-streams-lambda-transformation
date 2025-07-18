@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
@@ -43,7 +45,9 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCacheEnabled          = true
 		fileCacheExpiration       = 1 * time.Hour
 		fileCachePath             = "/tmp"
+		roles                     = []model.Role{{}} // At minimum, use the Lambda execution role.
 
+		validTagMap             = make(map[string]string)
 		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
 		responseRecords         = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
@@ -71,14 +75,25 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
+	if os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS") != "" {
+		validTagMapString := os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS")
+		validTagMap = makeValidTags(validTagMapString)
+	}
+
+	if os.Getenv("ACCOUNT_ROLE_ARNS_TO_SEARCH") != "" {
+		rolesString := os.Getenv("ACCOUNT_ROLE_ARNS_TO_SEARCH")
+		rolesSlice := strings.Split(rolesString, ",")
+		for _, roleArn := range rolesSlice {
+			roles = append(roles, model.Role{RoleArn: roleArn})
+		}
+	}
+
 	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
-				Regions: []string{*region},
-				// We need to declare the empty role, otherwise
-				// the cache setup for APIs will panic. This will force it
-				// to use the default IAM provided by Lambda.
-				Roles: []model.Role{{}},
+				Type:    "tag",             // required to match the discovery plugin
+				Regions: []string{*region}, // required
+				Roles:   roles,
 			},
 		},
 	}, false)
@@ -88,11 +103,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}
 	cache.Refresh()
 
-	// For now use the same concurrency as upstream implementation.
-	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
-
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, roles, cache, fileCacheExpiration, fileCacheEnabled, validTagMap)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -113,13 +125,58 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
+func getOrCacheResourcesToEFSUsingAllRoles(
+	logger logging.Logger,
+	roles []model.Role,
+	cache clients.Factory,
+	fileCachePath, namespace string,
+	region *string,
+	cacheExpiration time.Duration,
+	cacheEnabled bool,
+) ([]*model.TaggedResource, error) {
+
+	var resources []*model.TaggedResource
+
+	for _, role := range roles {
+		res, err := getOrCacheResourcesToEFS(logger, cache.GetTaggingClient(*region, role, 5), fileCachePath, namespace, role.RoleArn, region, cacheExpiration, cacheEnabled)
+		if err != nil && err != tagging.ErrExpectedToFindResources {
+			logger.Error(err, "Failed to get resources for namespace with role", "namespace", namespace, "role", role.RoleArn)
+			continue
+		}
+		if err == nil && len(res) > 0 {
+			logger.Debug("Found resources for namespace with role", "namespace", namespace, "role", role.RoleArn, "count", len(res))
+			resources = append(resources, res...)
+		}
+	}
+
+	return resources, nil
+}
+
+var accountFromARN = regexp.MustCompile(`arn:aws:[a-z-]+:[a-z0-9-]*:([0-9]{12}):`)
+
+func getOrCacheResourcesToEFS(
+	logger logging.Logger,
+	client tagging.Client,
+	fileCachePath, namespace string,
+	roleArn string,
+	region *string,
+	cacheExpiration time.Duration,
+	cacheEnabled bool,
+) ([]*model.TaggedResource, error) {
+
 	// If cacheEnabled is false, don't cache.
 	if !cacheEnabled {
+		logger.Debug("Reading resources from AWS", "namespace", namespace, "role", roleArn)
 		return retrieveResources(namespace, region, client)
 	}
 
-	filePath := fileCachePath + "/" + cacheFile + "-" + strings.ReplaceAll(namespace, "/", "-")
+	account := "default"
+	match := accountFromARN.FindStringSubmatch(roleArn)
+	if len(match) > 1 {
+		account = match[1]
+	}
+
+	filePath := fileCachePath + "/" + cacheFile + "-" + account + "-" + strings.ReplaceAll(namespace, "/", "-")
 
 	f, err := os.Open(filePath)
 	// If we cannot retrieve and it's not not found error, terminate.
@@ -137,7 +194,8 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, file
 	}
 
 	if os.IsNotExist(err) || isExpired {
-		logger.Debug("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
+		logger.Debug("Cache not found or expired, reading resources from AWS",
+			"namespace", namespace, "role", roleArn, "notExists", os.IsNotExist(err), "isExpired", isExpired)
 		resources, err := retrieveResources(namespace, region, client)
 		if err != nil {
 			return nil, err
@@ -160,7 +218,7 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, file
 		return resources, nil
 	}
 
-	logger.Debug("Reading resources from cached filed", "namespace", namespace)
+	logger.Debug("Reading resources from cached file", "namespace", namespace)
 	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
@@ -186,7 +244,7 @@ func retrieveResources(namespace string, region *string, client tagging.Client) 
 	return resources, nil
 }
 
-// enchanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
+// enhanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
 func enhanceRecordData(
 	logger logging.Logger,
@@ -196,9 +254,11 @@ func enhanceRecordData(
 	resourceCache map[string][]*model.TaggedResource,
 	associatorCache map[string]maxdimassociator.Associator,
 	region *string,
-	client tagging.Client,
+	roles []model.Role,
+	cache clients.Factory,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
+	validTagMap map[string]string,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -212,9 +272,9 @@ func enhanceRecordData(
 					switch t := metric.Data.(type) {
 					// All CloudWatch metrics are exported as summary, we therefore don't need to
 					// currently handle other types.
-					case *metricspb.Metric_DoubleSummary:
-						for _, dp := range t.DoubleSummary.DataPoints {
-							cwm := buildCloudWatchMetric(dp.Labels)
+					case *metricspb.Metric_Summary:
+						for _, dp := range t.Summary.DataPoints {
+							cwm := buildCloudWatchMetric(dp.Attributes)
 							logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -227,7 +287,7 @@ func enhanceRecordData(
 							}
 
 							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
+								resources, err := getOrCacheResourcesToEFSUsingAllRoles(logger, roles, cache, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
 									if continueOnResourceFailure {
@@ -236,6 +296,7 @@ func enhanceRecordData(
 									return nil, err
 								}
 								logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
+
 								resourceCache[cwm.Namespace] = resources
 							}
 
@@ -256,10 +317,16 @@ func enhanceRecordData(
 								continue
 							}
 
+							logger.Debug("Found matching resource", "resource", r.ARN, "namespace", cwm.Namespace, "metric", cwm.MetricName)
+
 							for _, tag := range r.Tags {
-								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
-									Key:   tag.Key,
-									Value: tag.Value,
+								tagKey, ok := validTagMap[tag.Key]
+								if !ok {
+									continue
+								}
+								dp.Attributes = append(dp.Attributes, &commonpb.KeyValue{
+									Key:   tagKey,
+									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
 								})
 							}
 						}
@@ -275,24 +342,40 @@ func enhanceRecordData(
 }
 
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
-// usage in the metrics associatior.
-func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *model.Metric {
+// usage in the metrics associator.
+func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
 	cwm := &model.Metric{}
-
-	for _, l := range ll {
-		switch l.Key {
+	for _, kv := range attrs {
+		var val string
+		if kv.Value != nil {
+			val = kv.Value.GetStringValue()
+		}
+		switch kv.Key {
 		case "MetricName":
-			cwm.MetricName = l.Value
+			cwm.MetricName = val
 		case "Namespace":
-			cwm.Namespace = l.Value
+			cwm.Namespace = val
+		case "Dimensions":
+			if kv.Value != nil {
+				dimensions := kv.Value.GetKvlistValue()
+				if dimensions != nil {
+					for _, keyValue := range dimensions.GetValues() {
+						if keyValue.GetValue() != nil {
+							cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+								Name:  keyValue.Key,
+								Value: keyValue.GetValue().GetStringValue(),
+							})
+						}
+					}
+				}
+			}
 		default:
 			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
-				Name:  l.Key,
-				Value: l.Value,
+				Name:  kv.Key,
+				Value: val,
 			})
 		}
 	}
-
 	return cwm
 }
 
@@ -336,4 +419,20 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 
 func newLogger(level string) logging.Logger {
 	return logging.NewLogger("json", level == "debug")
+}
+
+func makeValidTags(validTagMapString string) map[string]string {
+	validTagMap := make(map[string]string)
+	pairs := strings.Split(validTagMapString, "|")
+	for _, pair := range pairs {
+		if !strings.Contains(pair, "~") {
+			continue
+		}
+		keyVal := strings.Split(pair, "~")
+		if len(keyVal) != 2 || keyVal[0] == "" || keyVal[1] == "" {
+			continue
+		}
+		validTagMap[keyVal[0]] = keyVal[1]
+	}
+	return validTagMap
 }

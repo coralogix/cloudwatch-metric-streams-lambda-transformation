@@ -1,15 +1,16 @@
- # CloudWatch Metric Streams Lambda transformation
+# CloudWatch Metric Streams Lambda transformation
 
 ## About The Project
 This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.
 
-- Accepts Kinesis Firehose events with metric data in [OTLP v0.7, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html)
+- Accepts Kinesis Firehose events with metric data in [OTLP v1.0, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry-100.html)
 - Obtains AWS resource information through the [AWS tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/overview.html) and related APIs (API Gateway, EC2...)
+- Supports a map of tag keys that will be copied to metrics; skipping the rest
 - Associates CloudWatch metrics with particular resources and enriches the metric labels with resource tags, based on the [Yet Another CloudWatch Exporter](https://github.com/nerdswords/yet-another-cloudwatch-exporter) library
-- Returns Kinesis Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Kinesis stream
+- Returns Kinesis Firehose response with transformed record in OTLP v1.0, size-delimited format, for further processing and exporting to Chronopshere (or other) destination by the Kinesis stream
 
 ### Installation and usage
-1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
+1. Download the `bootstrap.zip` file from the [releases](https://github.com/UrbanCompass/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Custom runtime on Amazon Linux 2`
     - Handler: `bootstrap`
@@ -28,22 +29,26 @@ Please beware that the `Go 1.x` runtime will be [deprecated](https://aws.amazon.
 ### Configuration
 There is a couple of configuration options that can be set via environment variables:
 
-| Environment variable             | Default |Possible values   | Description   |
-|----------------------------------|---------|------------------|---------------|
-| `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
-| `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
-| `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| Environment variable                | Default | Possible values                 | Description                                                                                                                                                                                                                                                                                    |
+|-------------------------------------|---------|---------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `LOG_LEVEL`                         | `info`  | `debug`                         | Sets log level.
+| `CONTINUE_ON_RESOURCE_FAILURE`      | `true`  | `false`                         | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose. 
+| `FILE_CACHE_ENABLED`                | `true`  | `false`                         | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_PATH`                   | `/tmp`  | `<file_path>`                   | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_EXPIRATION`             | `1h`    | `<duration>`                    | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| `VALID_AWS_TAG_KEYS_TO_METRIC_KEYS` |         | `<aws_key1>~<metric_key1>\|...` | If not provided, all AWS tags from the resource corresponding to the metric will be copied to the metric. To filter the tags that are copied to each metric, provide a pipe delimited series of AWS tag key to (~) metric tag key.
+| `ACCOUNT_ROLE_ARNS_TO_SEARCH`       |         | `<ARN_1>,<ARN_2>,...`           | If not provided, get tags from the current Lambda execution role. If provided, the Lambda will assume the provided roles in order to get tags from resources in other accounts. You can provide multiple ARNs, separated by comma. Example role ARN: `arn:aws:iam::123456789000:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole` The Lambda will try to assume each role until it succeeds. Make sure the Lambda's execution role has permissions to assume the provided roles.
 
 ### Necessary permissions
-The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
+The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has a policy with the following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
+Example role name: `FirehoseLambdaMetricsTaggerReadTagsAccessRole` with the following policy named `FirehoseLambdaMetricsTaggerReadTagsPolicy`:
 ```
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Action": [
+        "iam:ListAccountAliases",
         "tag:GetResources",
         "cloudwatch:GetMetricData",
         "cloudwatch:GetMetricStatistics",
@@ -55,6 +60,7 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
         "dms:DescribeReplicationTasks",
         "ec2:DescribeTransitGatewayAttachments",
         "ec2:DescribeSpotFleetRequests",
+        "shield:ListProtections",
         "storagegateway:ListGateways",
         "storagegateway:ListTagsForResource"
       ],
@@ -64,6 +70,81 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
   ]
 }
 ```
+
+The trust policy for the role should have at least the following statement:
+```
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Service": "lambda.amazonaws.com"
+  },
+  "Action": "sts:AssumeRole"
+}
+```
+
+## Multiple accounts support
+
+AWS CloudWatch Metric Streams can be set up to stream metrics from multiple accounts into a single Kinesis Data Firehose.
+One account is set up in CloudWatch as the "monitoring account", which is the account where the Kinesis Data Firehose and the Lambda function are set up. The other accounts are "source accounts", which stream their metrics to the monitoring account.
+After setting up the monitoring account, an option will be available in the CloudWatch Metric Streams configuration to stream metrics from source accounts.
+For more information on setting up multi-account CloudWatch Metric Streams, see [this documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Unified-Cross-Account.html).
+
+Once metrics are being streamed from multiple accounts, the Lambda function needs to be configured to obtain tags from resources in these accounts as well.
+AWS has a concept of [cross-account observability](https://docs.aws.amazon.com/IAM/latest/UserGuide/tutorial_cross-account-with-roles.html), which allows a role in one account to assume a role in another account. This can be used to obtain tags from resources in multiple accounts.
+To enable the Lambda function to obtain tags from resources in multiple accounts, set the `ACCOUNT_ROLE_ARNS_TO_SEARCH` environment variable to a comma-separated list of role ARNs that the Lambda can assume in order to obtain tags from resources in other accounts.
+
+example:
+```
+ACCOUNT_ROLE_ARNS_TO_SEARCH=arn:aws:iam::123456789000:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole,arn:aws:iam::987654321000:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole
+```
+
+The Lambda will begin by trying to obtain tags from the current account (the monitoring account) using its own execution role.
+The Lambda will then try to assume each role in the `ACCOUNT_ROLE_ARNS_TO_SEARCH` list and fetch the resource tags.
+
+The permissions needed for the Lambda's execution role to assume roles in other accounts are as follows.
+On the monitoring account (the account where the Lambda is running), make sure the Lambda's execution role has permissions to assume the roles in other accounts.
+
+Example role name: `FirehoseLambdaMetricsTaggerReadTagsAccessRole` (from above) on the monitoring account needs this additional statement in the policy:
+
+```
+{
+  "Effect": "Allow",
+  "Action": "sts:AssumeRole",
+  "Resource": [
+     "arn:aws:iam::123456789000:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole",
+     "arn:aws:iam::987654321000:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole",
+     "..."
+   ]
+}
+```
+If there are a lot of accounts, you can use a wildcard in the resource ARN, like this:
+```"Resource": "arn:aws:iam::*:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole"
+```
+And deny individual accounts if needed, as follows (put this statement after the allow statement):
+```
+{
+  "Effect": "Deny",
+  "Action": "sts:AssumeRole",
+  "Resource": [
+     "arn:aws:iam::111111111111:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole",
+     "arn:aws:iam::222222222222:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole"
+   ]
+}
+```
+
+On the source accounts (the accounts where the resources are located), make sure the role that the Lambda will assume have a trust policy that allows the Lambda's execution role to assume them.
+Example role on the source account named `FirehoseLambdaMetricsTaggerReadTagsAccessRole` with trust policy:
+```
+{
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "arn:aws:iam::<monitoring-account-id>:role/FirehoseLambdaMetricsTaggerReadTagsAccessRole"
+  },
+  "Action": "sts:AssumeRole"
+}
+```
+The source account role should also have a policy with the necessary permissions to obtain resource tags, as described in the [Necessary permissions](###necessary-permissions) section above.
+
 
 ### Caching resources
 Users, who do not wish to fetch resources from the AWS API on every Lambda invocation, can take advantage of caching of resources to a local file. Caching is enabled by default; to disable it, set the `FILE_CACHE_ENABLED` environment variable to `false`.
