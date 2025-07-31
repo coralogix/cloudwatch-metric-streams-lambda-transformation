@@ -65,16 +65,16 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 			ResourceARN: aws.String(fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:volume/vol-%d", num+i)),
 			Tags: []*resourcegroupstaggingapi.Tag{
 				{
-					Key:   aws.String("Name"),
-					Value: aws.String("test-instance"),
+					Key:   aws.String("compass:automation:environment"),
+					Value: aws.String("testing"),
 				},
 				{
 					Key:   aws.String("compass:cost-mgmt:team-name"),
 					Value: aws.String("test-team-1"),
 				},
 				{
-					Key:   aws.String("compass:automation:environment"),
-					Value: aws.String("testing"),
+					Key:   aws.String("Name"),
+					Value: aws.String("test-instance"),
 				},
 			},
 		})
@@ -93,8 +93,8 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 								kv("Namespace", "AWS/EBS"),
 								kv("VolumeId", fmt.Sprintf("vol-%d", num+i)),
 								kv("Name", "test-instance"),
-								kv("team", "test-team-1"),
 								kv("env", "testing"),
+								kv("team", "test-team-1"),
 							},
 						},
 					},
@@ -124,8 +124,15 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 		t.Fatalf("failed to create test data: %v", err)
 	}
 
-	validTags := makeValidTags("compass:automation:managed-by~managed_by|compass:automation:environment~env|compass:cost-mgmt:group-name~group|compass:cost-mgmt:team-name~team|compass:cost-mgmt:service-name~service|Name~Name")
-	got, err := enhanceRecordData(l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), []model.Role{{}}, &mockFactory, 1*time.Hour, false, validTags)
+	tagList, err := makeTagList(`[["env","env"],["environment","env"],["InstanceEnvironment","env"],["ClusterEnvironment","env"],["compass:automation:environment","env"],["compass:cost-mgmt:group-name","group"],["compass:cost-mgmt:team-name","team"],["compass:cost-mgmt:service-name","service"],["compass:automation:managed-by","managed_by"],["Name","Name"]]`)
+	if err != nil {
+		t.Fatalf("failed to make tag list: %v", err)
+	}
+	tagMap := makeTagMap(tagList)
+	recordEnhancer := NewRecordEnhancer(l, ".", false, mockResourcesCache, mockAssociatorsCache,
+		aws.String("us-east-1"), []model.Role{{}}, &mockFactory, 1*time.Hour, false, nil,
+		tagList, tagMap, true, map[string][][]string{})
+	got, err := recordEnhancer.enhanceRecordData(data)
 	if err != nil {
 		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
 		return
@@ -144,6 +151,7 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 func Test_enhanceRecordData(t *testing.T) {
 	testCases := []struct {
 		name                      string
+		tagListIsFilter           bool
 		testMetrics               []*metricspb.Metric
 		resourceTagMapping        []*resourcegroupstaggingapi.ResourceTagMapping
 		continueOnResourceFailure bool
@@ -151,7 +159,8 @@ func Test_enhanceRecordData(t *testing.T) {
 		wantErr                   error
 	}{
 		{
-			name: "OK case with defaults (AWS/EBS)",
+			name:            "OK case with defaults (AWS/EBS)",
+			tagListIsFilter: true,
 			testMetrics: []*metricspb.Metric{
 				{
 					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
@@ -203,8 +212,73 @@ func Test_enhanceRecordData(t *testing.T) {
 										kv("Namespace", "AWS/EBS"),
 										kv("VolumeId", "vol-0123456789"),
 										kv("Name", "test-instance"),
-										kv("team", "test-team-1"),
 										kv("env", "testing"),
+										kv("team", "test-team-1"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:            "OK case with defaults (AWS/EBS); tagListIsFilter=false",
+			tagListIsFilter: false,
+			testMetrics: []*metricspb.Metric{
+				{
+					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
+					Unit: "Bytes",
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
+								{
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			resourceTagMapping: []*resourcegroupstaggingapi.ResourceTagMapping{
+				{
+					ResourceARN: aws.String("arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789"),
+					Tags: []*resourcegroupstaggingapi.Tag{
+						{
+							Key:   aws.String("Name"),
+							Value: aws.String("test-instance"),
+						},
+						{
+							Key:   aws.String("compass:cost-mgmt:team-name"),
+							Value: aws.String("test-team-1"),
+						},
+						{
+							Key:   aws.String("compass:automation:environment"),
+							Value: aws.String("testing"),
+						},
+					},
+				},
+			},
+			wantMetrics: []*metricspb.Metric{
+				{
+					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
+					Unit: "Bytes",
+					Data: &metricspb.Metric_Summary{
+						Summary: &metricspb.Summary{
+							DataPoints: []*metricspb.SummaryDataPoint{
+								{
+									Attributes: []*commonpb.KeyValue{
+										kv("MetricName", "VolumeWriteBytes"),
+										kv("Namespace", "AWS/EBS"),
+										kv("VolumeId", "vol-0123456789"),
+										kv("Name", "test-instance"),
+										kv("aws-account-name", "Agent Financial Center (gamma)"),
+										kv("env", "testing"),
+										kv("team", "test-team-1"),
 									},
 								},
 							},
@@ -299,7 +373,17 @@ func Test_enhanceRecordData(t *testing.T) {
 		},
 	}
 
-	validTags := makeValidTags("compass:automation:managed-by~managed_by|compass:automation:environment~env|compass:cost-mgmt:group-name~group|compass:cost-mgmt:team-name~team|compass:cost-mgmt:service-name~service|Name~Name")
+	tagList, err := makeTagList(`[["env","env"],["environment","env"],["InstanceEnvironment","env"],["ClusterEnvironment","env"],["compass:automation:environment","env"],["compass:cost-mgmt:group-name","group"],["compass:cost-mgmt:team-name","team"],["compass:cost-mgmt:service-name","service"],["compass:automation:managed-by","managed_by"],["Name","Name"]]`)
+	if err != nil {
+		t.Fatalf("failed to make tag list: %v", err)
+	}
+	tagMap := makeTagMap(tagList)
+	awsAccountToTagsString := `{"123456789012":[["env","gamma"],["aws-account-name","Agent Financial Center (gamma)"]]}`
+	awsAccountToTagsMap, err := makeAccountToTagsMap(awsAccountToTagsString)
+	if err != nil {
+		t.Fatalf("failed to make account to tags map: %v", err)
+	}
+
 	for _, tt := range testCases {
 		l := logging.NewNopLogger()
 		mockResourcesCache := make(map[string][]*model.TaggedResource)
@@ -311,13 +395,16 @@ func Test_enhanceRecordData(t *testing.T) {
 		)
 		mockFactory := mockCachingFactory{taggingClient: mockTaggingClient}
 
+		recordEnhancer := NewRecordEnhancer(l, ".", false, mockResourcesCache, mockAssociatorsCache,
+			aws.String("us-east-1"), []model.Role{{}}, &mockFactory, 1*time.Hour, false, nil,
+			tagList, tagMap, tt.tagListIsFilter, awsAccountToTagsMap)
+
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := createTestDataFromMetrics(tt.testMetrics)
 			if err != nil {
 				t.Fatalf("failed to create test data: %v", err)
 			}
-
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), []model.Role{{}}, &mockFactory, 1*time.Hour, false, validTags)
+			got, err := recordEnhancer.enhanceRecordData(data)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -373,6 +460,13 @@ func Test_getOrCacheResources(t *testing.T) {
 		}
 	})
 
+	mrg := mockResourcesGetter{
+		mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
+	}
+	recordEnhancer := NewRecordEnhancer(logging.NewNopLogger(), ".", false, nil, nil,
+		aws.String("us-east-1"), []model.Role{{}}, nil, 1*time.Hour, true, nil,
+		nil, nil, true, map[string][][]string{})
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Ensure file does not exist, if it should not.
@@ -382,15 +476,10 @@ func Test_getOrCacheResources(t *testing.T) {
 					t.Fatalf("file %s should not exist", tc.wantCreatedFile)
 				}
 			}
-
-			mrg := mockResourcesGetter{
-				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
-			}
-			_, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, "", aws.String("us-east-1"), 1*time.Hour, true)
+			_, err := recordEnhancer.getOrCacheResourcesToEFS(mrg, tc.namespace, "")
 			if err != nil {
 				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
 			}
-
 			if tc.wantCreatedFile != "" {
 				_, err := os.Open(tc.wantCreatedFile)
 				if err != nil {

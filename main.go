@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/arn"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -47,10 +50,14 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath             = "/tmp"
 		roles                     = []model.Role{{}} // At minimum, use the Lambda execution role.
 
-		validTagMap             = make(map[string]string)
-		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
-		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
-		responseRecords         = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
+		metricsToRewriteTimestamp = make(map[string]string)
+		awsAccountToTagsMap       = make(map[string][][]string)
+		awsTagToMetricLabelList   [][]string
+		awsTagToMetricLabelMap    = make(map[string]string)
+		awsTagMapIsFilter         = true
+		resourcesCache            = make(map[string][]*model.TaggedResource)
+		associatorsCache          = make(map[string]maxdimassociator.Associator)
+		responseRecords           = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
 
 	// Override the default continueOnResourceFailure value if the env var is set.
@@ -75,17 +82,47 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
-	if os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS") != "" {
-		validTagMapString := os.Getenv("VALID_AWS_TAG_KEYS_TO_METRIC_KEYS")
-		validTagMap = makeValidTags(validTagMapString)
+	if os.Getenv("METRICS_TO_REWRITE_TIMESTAMP") != "" {
+		awsMetricsToRewriteTimestampString := os.Getenv("METRICS_TO_REWRITE_TIMESTAMP")
+		var err error
+		if metricsToRewriteTimestamp, err = makeMetricsToRewriteMap(awsMetricsToRewriteTimestampString); err != nil {
+			logger.Error(err, "Failed to parse value for METRICS_TO_REWRITE_TIMESTAMP, falling back to empty map")
+			metricsToRewriteTimestamp = map[string]string{}
+		}
 	}
 
-	if os.Getenv("ACCOUNT_ROLE_ARNS_TO_SEARCH") != "" {
-		rolesString := os.Getenv("ACCOUNT_ROLE_ARNS_TO_SEARCH")
-		rolesSlice := strings.Split(rolesString, ",")
-		for _, roleArn := range rolesSlice {
-			roles = append(roles, model.Role{RoleArn: roleArn})
+	if os.Getenv("AWS_ACCOUNTS_TO_TAGS") != "" {
+		awsTagMapString := os.Getenv("AWS_ACCOUNTS_TO_TAGS")
+		var err error
+		if awsAccountToTagsMap, err = makeAccountToTagsMap(awsTagMapString); err != nil {
+			logger.Error(err, "Failed to parse value for AWS_ACCOUNTS_TO_TAGS, falling back to empty map")
+			awsAccountToTagsMap = map[string][][]string{}
 		}
+	}
+
+	if os.Getenv("AWS_TAG_NAME_TO_METRIC_LABEL") != "" {
+		awsTagMapString := os.Getenv("AWS_TAG_NAME_TO_METRIC_LABEL")
+		var err error
+		if awsTagToMetricLabelList, err = makeTagList(awsTagMapString); err != nil {
+			logger.Error(err, "Failed to parse value for AWS_TAG_NAME_TO_METRIC_LABEL, falling back to empty list")
+			awsTagToMetricLabelList = [][]string{}
+		}
+		awsTagToMetricLabelMap = makeTagMap(awsTagToMetricLabelList)
+		if len(awsTagToMetricLabelList) != len(awsTagToMetricLabelMap) {
+			logger.Debug("Tag list and map lengths do not match. Skipping tag enrichment",
+				"tagListLength", len(awsTagToMetricLabelList), "tagMapLength", len(awsTagToMetricLabelMap),
+				"tagList", awsTagToMetricLabelList, "tagMap", awsTagToMetricLabelMap)
+		}
+	}
+
+	if os.Getenv("AWS_TAG_NAME_IS_FILTER") == "false" {
+		awsTagMapIsFilter = false
+	}
+
+	if os.Getenv("AWS_ROLE_TO_ASSUME") != "" && os.Getenv("AWS_ACCOUNTS_TO_SEARCH") != "" {
+		roleString := os.Getenv("AWS_ROLE_TO_ASSUME")
+		accountsString := os.Getenv("AWS_ACCOUNTS_TO_SEARCH")
+		roles = makeRoleArns(roleString, accountsString)
 	}
 
 	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
@@ -103,13 +140,16 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}
 	cache.Refresh()
 
+	recordEnhancer := NewRecordEnhancer(logger, fileCachePath, continueOnResourceFailure, resourcesCache, associatorsCache,
+		region, roles, cache, fileCacheExpiration, fileCacheEnabled, metricsToRewriteTimestamp,
+		awsTagToMetricLabelList, awsTagToMetricLabelMap, awsTagMapIsFilter, awsAccountToTagsMap)
+
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, roles, cache, fileCacheExpiration, fileCacheEnabled, validTagMap)
+		newData, err := recordEnhancer.enhanceRecordData(record.Data)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
 		}
-
 		// Resulting data must be Base64 encoded.
 		result := make([]byte, base64.StdEncoding.EncodedLen(len(newData)))
 		base64.StdEncoding.Encode(result, newData)
@@ -125,49 +165,100 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFSUsingAllRoles(
+// RecordEnhancer takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
+// looks up the resources for the metrics and adds the tags to the metrics.
+type RecordEnhancer struct {
+	logger                    logging.Logger
+	fileCachePath             string
+	continueOnResourceFailure bool
+	resourceCache             map[string][]*model.TaggedResource
+	associatorCache           map[string]maxdimassociator.Associator
+	region                    *string
+	roles                     []model.Role
+	cache                     clients.Factory
+	fileCacheExpiration       time.Duration
+	fileCacheEnabled          bool
+	metricsToRewriteTimestamp map[string]string
+	awsTagToMetricLabelList   [][]string
+	awsTagToMetricLabelMap    map[string]string
+	awsTagMapIsFilter         bool
+	awsAccountToTagsMap       map[string][][]string
+}
+
+func NewRecordEnhancer(
 	logger logging.Logger,
+	fileCachePath string,
+	continueOnResourceFailure bool,
+	resourceCache map[string][]*model.TaggedResource,
+	associatorCache map[string]maxdimassociator.Associator,
+	region *string,
 	roles []model.Role,
 	cache clients.Factory,
-	fileCachePath, namespace string,
-	region *string,
-	cacheExpiration time.Duration,
-	cacheEnabled bool,
-) ([]*model.TaggedResource, error) {
+	fileCacheExpiration time.Duration,
+	fileCacheEnabled bool,
+	metricsToRewriteTimestamp map[string]string,
+	awsTagToMetricLabelList [][]string,
+	awsTagToMetricLabelMap map[string]string,
+	awsTagMapIsFilter bool,
+	awsAccountToTagsMap map[string][][]string,
+) *RecordEnhancer {
+	return &RecordEnhancer{
+		logger:                    logger,
+		fileCachePath:             fileCachePath,
+		continueOnResourceFailure: continueOnResourceFailure,
+		resourceCache:             resourceCache,
+		associatorCache:           associatorCache,
+		region:                    region,
+		roles:                     roles,
+		cache:                     cache,
+		fileCacheExpiration:       fileCacheExpiration,
+		fileCacheEnabled:          fileCacheEnabled,
+		metricsToRewriteTimestamp: metricsToRewriteTimestamp,
+		awsTagToMetricLabelList:   awsTagToMetricLabelList,
+		awsTagToMetricLabelMap:    awsTagToMetricLabelMap,
+		awsTagMapIsFilter:         awsTagMapIsFilter,
+		awsAccountToTagsMap:       awsAccountToTagsMap,
+	}
+}
 
+func (e *RecordEnhancer) getOrCacheResourcesToEFSUsingAllRoles(
+	namespace string,
+) (
+	[]*model.TaggedResource,
+	error,
+) {
 	var resources []*model.TaggedResource
-
-	for _, role := range roles {
-		res, err := getOrCacheResourcesToEFS(logger, cache.GetTaggingClient(*region, role, 5), fileCachePath, namespace, role.RoleArn, region, cacheExpiration, cacheEnabled)
+	for _, role := range e.roles {
+		res, err := e.getOrCacheResourcesToEFS(e.cache.GetTaggingClient(*e.region, role, 5), namespace, role.RoleArn)
 		if err != nil && err != tagging.ErrExpectedToFindResources {
-			logger.Error(err, "Failed to get resources for namespace with role", "namespace", namespace, "role", role.RoleArn)
+			e.logger.Error(err, "Failed to get resources for namespace with role", "namespace", namespace, "role", role.RoleArn)
 			continue
 		}
 		if err == nil && len(res) > 0 {
-			logger.Debug("Found resources for namespace with role", "namespace", namespace, "role", role.RoleArn, "count", len(res))
+			e.logger.Debug("Found resources for namespace with role", "namespace", namespace, "role", role.RoleArn, "count", len(res))
 			resources = append(resources, res...)
 		}
 	}
-
 	return resources, nil
 }
 
 var accountFromARN = regexp.MustCompile(`arn:aws:[a-z-]+:[a-z0-9-]*:([0-9]{12}):`)
 
-func getOrCacheResourcesToEFS(
-	logger logging.Logger,
+func (e *RecordEnhancer) getOrCacheResourcesToEFS(
 	client tagging.Client,
-	fileCachePath, namespace string,
+	namespace string,
 	roleArn string,
-	region *string,
-	cacheExpiration time.Duration,
-	cacheEnabled bool,
 ) ([]*model.TaggedResource, error) {
 
-	// If cacheEnabled is false, don't cache.
-	if !cacheEnabled {
-		logger.Debug("Reading resources from AWS", "namespace", namespace, "role", roleArn)
-		return retrieveResources(namespace, region, client)
+	if !e.fileCacheEnabled {
+		e.logger.Debug("Reading resources from AWS", "namespace", namespace, "role", roleArn)
+		resources, err := retrieveResources(namespace, e.region, client)
+		if err != nil {
+			return nil, err
+		}
+		addAccountTagsToResources(resources, e.awsAccountToTagsMap)
+		rewriteResourceTags(resources, e.awsTagToMetricLabelList, e.awsTagToMetricLabelMap, e.awsTagMapIsFilter)
+		return resources, nil
 	}
 
 	account := "default"
@@ -176,7 +267,7 @@ func getOrCacheResourcesToEFS(
 		account = match[1]
 	}
 
-	filePath := fileCachePath + "/" + cacheFile + "-" + account + "-" + strings.ReplaceAll(namespace, "/", "-")
+	filePath := e.fileCachePath + "/" + cacheFile + "-" + account + "-" + strings.ReplaceAll(namespace, "/", "-")
 
 	f, err := os.Open(filePath)
 	// If we cannot retrieve and it's not not found error, terminate.
@@ -190,16 +281,18 @@ func getOrCacheResourcesToEFS(
 		if err != nil {
 			return nil, err
 		}
-		isExpired = fs.ModTime().Add(cacheExpiration).Before(time.Now())
+		isExpired = fs.ModTime().Add(e.fileCacheExpiration).Before(time.Now())
 	}
 
 	if os.IsNotExist(err) || isExpired {
-		logger.Debug("Cache not found or expired, reading resources from AWS",
+		e.logger.Debug("Cache not found or expired, reading resources from AWS",
 			"namespace", namespace, "role", roleArn, "notExists", os.IsNotExist(err), "isExpired", isExpired)
-		resources, err := retrieveResources(namespace, region, client)
+		resources, err := retrieveResources(namespace, e.region, client)
 		if err != nil {
 			return nil, err
 		}
+		addAccountTagsToResources(resources, e.awsAccountToTagsMap)
+		rewriteResourceTags(resources, e.awsTagToMetricLabelList, e.awsTagToMetricLabelMap, e.awsTagMapIsFilter)
 		b, err := json.Marshal(resources)
 		if err != nil {
 			return nil, err
@@ -218,7 +311,7 @@ func getOrCacheResourcesToEFS(
 		return resources, nil
 	}
 
-	logger.Debug("Reading resources from cached file", "namespace", namespace)
+	e.logger.Debug("Reading resources from cached file", "namespace", namespace)
 	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
@@ -246,20 +339,12 @@ func retrieveResources(namespace string, region *string, client tagging.Client) 
 
 // enhanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
-func enhanceRecordData(
-	logger logging.Logger,
-	fileCachePath string,
-	continueOnResourceFailure bool,
+func (e *RecordEnhancer) enhanceRecordData(
 	data []byte,
-	resourceCache map[string][]*model.TaggedResource,
-	associatorCache map[string]maxdimassociator.Associator,
-	region *string,
-	roles []model.Role,
-	cache clients.Factory,
-	fileCacheExpiration time.Duration,
-	fileCacheEnabled bool,
-	validTagMap map[string]string,
-) ([]byte, error) {
+) (
+	[]byte,
+	error,
+) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
 		return nil, err
@@ -275,63 +360,69 @@ func enhanceRecordData(
 					case *metricspb.Metric_Summary:
 						for _, dp := range t.Summary.DataPoints {
 							cwm := buildCloudWatchMetric(dp.Attributes)
-							logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
+							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
-								logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 
-							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := getOrCacheResourcesToEFSUsingAllRoles(logger, roles, cache, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
+							if e.metricsToRewriteTimestamp != nil && len(e.metricsToRewriteTimestamp) > 0 {
+								key := cwm.Namespace + ":" + cwm.MetricName
+								if _, ok := e.metricsToRewriteTimestamp[key]; ok {
+									currentTimeNano := time.Now().UnixNano()
+									dp.TimeUnixNano = uint64(currentTimeNano)
+									dp.StartTimeUnixNano = uint64(currentTimeNano - time.Minute.Nanoseconds())
+								}
+							}
+
+							if _, ok := e.resourceCache[cwm.Namespace]; !ok {
+								resources, err := e.getOrCacheResourcesToEFSUsingAllRoles(cwm.Namespace)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
-									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
-									if continueOnResourceFailure {
+									e.logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
+									if e.continueOnResourceFailure {
 										continue
 									}
 									return nil, err
 								}
-								logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
+								e.logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
 
-								resourceCache[cwm.Namespace] = resources
+								e.resourceCache[cwm.Namespace] = resources
 							}
 
-							asc, ok := associatorCache[cwm.Namespace]
+							asc, ok := e.associatorCache[cwm.Namespace]
 							if !ok {
-								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
-								asc = maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
-								associatorCache[cwm.Namespace] = asc
+								e.logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
+								asc = maxdimassociator.NewAssociator(e.logger, svc.DimensionRegexps, e.resourceCache[cwm.Namespace])
+								e.associatorCache[cwm.Namespace] = asc
 							}
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 							if skip {
-								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 
-							logger.Debug("Found matching resource", "resource", r.ARN, "namespace", cwm.Namespace, "metric", cwm.MetricName)
+							e.logger.Debug("Found matching resource", "resource", r.ARN, "namespace", cwm.Namespace, "metric", cwm.MetricName)
 
 							for _, tag := range r.Tags {
-								tagKey, ok := validTagMap[tag.Key]
-								if !ok {
-									continue
-								}
 								dp.Attributes = append(dp.Attributes, &commonpb.KeyValue{
-									Key:   tagKey,
+									Key:   tag.Key,
 									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
 								})
 							}
+							continue
 						}
 					default:
-						logger.Debug("Unsupported metric type", t)
+						e.logger.Debug("Unsupported metric type", t)
 					}
 				}
 			}
@@ -417,22 +508,163 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 	return b.Bytes(), nil
 }
 
+func addAccountTagsToResources(resources []*model.TaggedResource, accountToTagsMap map[string][][]string) {
+	if len(accountToTagsMap) == 0 {
+		return
+	}
+	for _, resource := range resources {
+		if resource == nil || resource.ARN == "" || !arn.IsARN(resource.ARN) {
+			continue
+		}
+		parsedARN, err := arn.Parse(resource.ARN)
+		if err != nil || parsedARN.AccountID == "" {
+			continue
+		}
+		if accountTags, ok := accountToTagsMap[parsedARN.AccountID]; ok {
+			resourceTags := make(map[string]string)
+			for _, tag := range resource.Tags {
+				resourceTags[tag.Key] = tag.Value
+			}
+			for _, tag := range accountTags {
+				if _, ok := resourceTags[tag[0]]; !ok {
+					resource.Tags = append(resource.Tags, model.Tag{Key: tag[0], Value: tag[1]})
+				}
+			}
+		}
+	}
+}
+
+func rewriteResourceTags(resources []*model.TaggedResource, awsTagToMetricLabelList [][]string, awsTagToMetricLabelMap map[string]string, awsTagMapIsFilter bool) {
+	if awsTagToMetricLabelList == nil || len(awsTagToMetricLabelList) == 0 {
+		return
+	}
+	for _, r := range resources {
+		dedupedTags := make(map[string]string)
+		matchedTags := make(map[string]model.Tag)
+		for _, tag := range r.Tags {
+			mappedMetricLabel, ok := awsTagToMetricLabelMap[tag.Key]
+			if !ok {
+				if !awsTagMapIsFilter {
+					dedupedTags[tag.Key] = tag.Value
+				}
+				continue
+			}
+			matchedTags[tag.Key] = model.Tag{Key: mappedMetricLabel, Value: tag.Value}
+		}
+		dedupedMetricLabelNamesWithValuesUpdatedInOrderOfTagList := make(map[string]string)
+		for _, tag := range awsTagToMetricLabelList {
+			if matchedTag, ok := matchedTags[tag[0]]; ok {
+				dedupedMetricLabelNamesWithValuesUpdatedInOrderOfTagList[matchedTag.Key] = matchedTag.Value
+			}
+		}
+		for k, v := range dedupedMetricLabelNamesWithValuesUpdatedInOrderOfTagList {
+			dedupedTags[k] = v
+		}
+		sortedTagKeys := make([]string, 0, len(dedupedTags))
+		for k := range dedupedTags {
+			sortedTagKeys = append(sortedTagKeys, k)
+		}
+		sort.Strings(sortedTagKeys)
+		r.Tags = make([]model.Tag, 0, len(sortedTagKeys))
+		for _, tagKey := range sortedTagKeys {
+			tagValue := dedupedTags[tagKey]
+			if tagValue != "" {
+				r.Tags = append(r.Tags, model.Tag{
+					Key:   tagKey,
+					Value: tagValue,
+				})
+			}
+		}
+	}
+}
+
 func newLogger(level string) logging.Logger {
 	return logging.NewLogger("json", level == "debug")
 }
 
-func makeValidTags(validTagMapString string) map[string]string {
-	validTagMap := make(map[string]string)
-	pairs := strings.Split(validTagMapString, "|")
-	for _, pair := range pairs {
-		if !strings.Contains(pair, "~") {
+func makeMetricsToRewriteMap(metricsToRewriteString string) (map[string]string, error) {
+	if metricsToRewriteString == "" {
+		return nil, nil
+	}
+	var metricsList []string
+	err := json.Unmarshal([]byte(metricsToRewriteString), &metricsList)
+	if err != nil {
+		return nil, err
+	}
+	if metricsList == nil || len(metricsList) == 0 {
+		return map[string]string{}, nil
+	}
+	metricsMap := make(map[string]string, len(metricsList))
+	for _, metric := range metricsList {
+		if metric == "" {
+			return nil, errors.New("invalid metric name, expected a non-empty string")
+		}
+		metricsMap[metric] = metric
+	}
+	return metricsMap, nil
+}
+
+func makeAccountToTagsMap(accountToTagsString string) (map[string][][]string, error) {
+	if accountToTagsString == "" {
+		return nil, nil
+	}
+	accountToTagsMap := make(map[string][][]string)
+	err := json.Unmarshal([]byte(accountToTagsString), &accountToTagsMap)
+	if err != nil {
+		return nil, err
+	}
+	if accountToTagsMap == nil || len(accountToTagsMap) == 0 {
+		return map[string][][]string{}, nil
+	}
+	for account, tagList := range accountToTagsMap {
+		if tagList == nil || len(tagList) == 0 {
+			return nil, errors.New("invalid tag format for account " + account + ", expected a list of non-empty string pairs")
+		}
+		for _, tuple := range tagList {
+			if len(tuple) != 2 || tuple[0] == "" || tuple[1] == "" {
+				return nil, errors.New("invalid tag format for account " + account + ", expected a list of non-empty string pairs")
+			}
+		}
+	}
+	return accountToTagsMap, nil
+}
+
+func makeRoleArns(roleString, accountsString string) []model.Role {
+	roleString = strings.TrimSpace(roleString)
+	accountsSlice := strings.Split(accountsString, ",")
+	roles := []model.Role{{}}
+	for _, account := range accountsSlice {
+		account = strings.TrimSpace(account)
+		roleArn := "arn:aws:iam::" + account + ":role/" + roleString
+		roles = append(roles, model.Role{RoleArn: roleArn})
+	}
+	return roles
+}
+
+func makeTagList(validTagMapString string) ([][]string, error) {
+	var validTagList [][]string
+	err := json.Unmarshal([]byte(validTagMapString), &validTagList)
+	if err != nil {
+		return nil, err
+	}
+	if validTagList == nil || len(validTagList) == 0 {
+		return [][]string{}, nil
+	}
+	for _, tuple := range validTagList {
+		if len(tuple) != 2 || tuple[0] == "" || tuple[1] == "" {
+			return nil, errors.New("invalid tag format, expected a list of non-empty string pairs")
+		}
+	}
+	return validTagList, nil
+}
+
+func makeTagMap(validTagList [][]string) map[string]string {
+	validTagMap := make(map[string]string, len(validTagList))
+	for _, tag := range validTagList {
+		if len(tag) != 2 || tag[0] == "" || tag[1] == "" {
 			continue
 		}
-		keyVal := strings.Split(pair, "~")
-		if len(keyVal) != 2 || keyVal[0] == "" || keyVal[1] == "" {
-			continue
-		}
-		validTagMap[keyVal[0]] = keyVal[1]
+		validTagMap[tag[0]] = tag[1]
 	}
 	return validTagMap
 }
