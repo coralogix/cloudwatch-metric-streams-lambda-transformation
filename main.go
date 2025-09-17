@@ -34,6 +34,11 @@ import (
 
 const cacheFile = "cache"
 
+type CloudWatchMetric struct {
+	yaceCWMetric *model.Metric
+	awsAccount   string
+}
+
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -359,7 +364,8 @@ func (e *RecordEnhancer) enhanceRecordData(
 					// currently handle other types.
 					case *metricspb.Metric_Summary:
 						for _, dp := range t.Summary.DataPoints {
-							cwm := buildCloudWatchMetric(dp.Attributes)
+							yaceCWM := buildCloudWatchMetric(dp.Attributes)
+							cwm := yaceCWM.yaceCWMetric
 							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								e.logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -403,11 +409,13 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								e.logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
 							if skip {
-								e.logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
 
@@ -432,10 +440,31 @@ func (e *RecordEnhancer) enhanceRecordData(
 	return requestsIntoRawData(expMetricsReqs)
 }
 
+// addAccountTagsToMetric adds tags to the metric based on the aws_account attribute and the accountToTagsMap.
+func (e *RecordEnhancer) addAccountTagsToMetric(summaryDataPoint *metricspb.SummaryDataPoint, cwMetric *CloudWatchMetric, accountToTagsMap map[string][][]string) {
+	if len(accountToTagsMap) == 0 {
+		return
+	}
+	if cwMetric.awsAccount == "" {
+		yaceCWM := cwMetric.yaceCWMetric
+		e.logger.Warn("aws_account attribute not found in metric, cannot add account tags", "namespace", yaceCWM.Namespace, "metric", yaceCWM.MetricName)
+	}
+	if accountTags, ok := accountToTagsMap[cwMetric.awsAccount]; ok {
+		for _, tag := range accountTags {
+			summaryDataPoint.Attributes = append(summaryDataPoint.Attributes, &commonpb.KeyValue{
+				Key:   tag[0],
+				Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag[1]}},
+			})
+		}
+	}
+	return
+}
+
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
 // usage in the metrics associator.
-func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
-	cwm := &model.Metric{}
+func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
+	yaceCWMetric := &model.Metric{}
+	var awsAccount string
 	for _, kv := range attrs {
 		var val string
 		if kv.Value != nil {
@@ -443,16 +472,21 @@ func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
 		}
 		switch kv.Key {
 		case "MetricName":
-			cwm.MetricName = val
+			yaceCWMetric.MetricName = val
 		case "Namespace":
-			cwm.Namespace = val
+			yaceCWMetric.Namespace = val
+		case "aws_account":
+			// AWS CloudWatch adds the aws_account field to metrics in metric streams when source and monitor accounts
+			// are configured. This field identifies the AWS account ID where the metric originated, which is
+			// particularly useful in cross-account monitoring setups.
+			awsAccount = val
 		case "Dimensions":
 			if kv.Value != nil {
 				dimensions := kv.Value.GetKvlistValue()
 				if dimensions != nil {
 					for _, keyValue := range dimensions.GetValues() {
 						if keyValue.GetValue() != nil {
-							cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+							yaceCWMetric.Dimensions = append(yaceCWMetric.Dimensions, &model.Dimension{
 								Name:  keyValue.Key,
 								Value: keyValue.GetValue().GetStringValue(),
 							})
@@ -461,11 +495,15 @@ func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *model.Metric {
 				}
 			}
 		default:
-			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+			yaceCWMetric.Dimensions = append(yaceCWMetric.Dimensions, &model.Dimension{
 				Name:  kv.Key,
 				Value: val,
 			})
 		}
+	}
+	cwm := &CloudWatchMetric{
+		yaceCWMetric: yaceCWMetric,
+		awsAccount:   awsAccount,
 	}
 	return cwm
 }
