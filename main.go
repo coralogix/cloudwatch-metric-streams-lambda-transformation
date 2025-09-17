@@ -368,12 +368,12 @@ func (e *RecordEnhancer) enhanceRecordData(
 							cwm := yaceCWM.yaceCWMetric
 							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
-								e.logger.Debug("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								continue
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								e.logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
