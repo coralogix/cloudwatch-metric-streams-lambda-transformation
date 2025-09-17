@@ -374,6 +374,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
 								e.logger.Debug("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
 
