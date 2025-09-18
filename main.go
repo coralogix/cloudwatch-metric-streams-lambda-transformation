@@ -383,7 +383,8 @@ func (e *RecordEnhancer) enhanceRecordData(
 								if _, ok := e.metricsToRewriteTimestamp[key]; ok {
 									currentTimeNano := time.Now().UnixNano()
 									dp.TimeUnixNano = uint64(currentTimeNano)
-									dp.StartTimeUnixNano = uint64(currentTimeNano - time.Minute.Nanoseconds())
+									// According to Chronosphere only the TimeUnixNano timestamp needs to be updated for the staleness to be reset.
+									// dp.StartTimeUnixNano = uint64(currentTimeNano - time.Minute.Nanoseconds())
 								}
 							}
 
