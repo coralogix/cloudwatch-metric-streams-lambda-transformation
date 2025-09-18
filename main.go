@@ -39,6 +39,18 @@ type CloudWatchMetric struct {
 	awsAccount   string
 }
 
+func (e *CloudWatchMetric) PrettyLog() string {
+	dimNames := make([]string, 0, len(e.yaceCWMetric.Dimensions))
+	for _, d := range e.yaceCWMetric.Dimensions {
+		if d == nil {
+			continue
+		}
+		dimNames = append(dimNames, d.Name)
+	}
+	sort.Strings(dimNames)
+	return "aws_account= " + e.awsAccount + " namespace=" + e.yaceCWMetric.Namespace + " metric=" + e.yaceCWMetric.MetricName + " dimensions=[" + strings.Join(dimNames, ",") + "]"
+}
+
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -373,7 +385,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								e.logger.Warn("Unsupported namespace, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("Unsupported namespace, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
@@ -411,12 +423,12 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								e.logger.Warn("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("No matching resource found, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
 							if skip {
-								e.logger.Warn("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								e.logger.Warn("Could not associate any resource, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
