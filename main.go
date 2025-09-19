@@ -35,20 +35,29 @@ import (
 const cacheFile = "cache"
 
 type CloudWatchMetric struct {
-	yaceCWMetric *model.Metric
-	awsAccount   string
+	resourceAttributes map[string]string
+	yaceMetric         *model.Metric
+	awsAccount         string
 }
 
-func (e *CloudWatchMetric) PrettyLog() string {
-	dimNames := make([]string, 0, len(e.yaceCWMetric.Dimensions))
-	for _, d := range e.yaceCWMetric.Dimensions {
+func (e *CloudWatchMetric) AsSlice() []interface{} {
+	var output []interface{}
+	output = append(output,
+		"aws_account", e.awsAccount,
+		"namespace", e.yaceMetric.Namespace,
+		"metric", e.yaceMetric.MetricName)
+	if e.resourceAttributes != nil {
+		for key, val := range e.resourceAttributes {
+			output = append(output, "r_"+key, val)
+		}
+	}
+	for _, d := range e.yaceMetric.Dimensions {
 		if d == nil {
 			continue
 		}
-		dimNames = append(dimNames, d.Name)
+		output = append(output, d.Name, d.Value)
 	}
-	sort.Strings(dimNames)
-	return "aws_account= " + e.awsAccount + " namespace=" + e.yaceCWMetric.Namespace + " metric=" + e.yaceCWMetric.MetricName + " dimensions=[" + strings.Join(dimNames, ",") + "]"
+	return output
 }
 
 func main() {
@@ -369,6 +378,23 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
+
+			resourceAttributes := make(map[string]string)
+			var awsAccount string
+			if ilms.Resource != nil && len(ilms.Resource.Attributes) > 0 {
+				for _, attr := range ilms.Resource.Attributes {
+					if attr.Value != nil {
+						if attr.Key == "cloud.account.id" && attr.Value != nil {
+							if attr.Value.GetStringValue() != "" {
+								e.logger.Debug("Found cloud.account.id attribute on resource", "account", attr.Value.GetStringValue())
+								awsAccount = attr.Value.GetStringValue()
+							}
+						}
+						resourceAttributes[attr.Key] = attr.Value.GetStringValue()
+					}
+				}
+			}
+
 			for _, ilm := range ilms.InstrumentationLibraryMetrics {
 				for _, metric := range ilm.Metrics {
 					switch t := metric.Data.(type) {
@@ -377,7 +403,23 @@ func (e *RecordEnhancer) enhanceRecordData(
 					case *metricspb.Metric_Summary:
 						for _, dp := range t.Summary.DataPoints {
 							yaceCWM := buildCloudWatchMetric(dp.Attributes)
-							cwm := yaceCWM.yaceCWMetric
+							yaceCWM.resourceAttributes = resourceAttributes
+							if yaceCWM.awsAccount == "" {
+								if awsAccount != "" {
+									yaceCWM.awsAccount = awsAccount
+								} else {
+									e.logger.Warn("aws account not found in metric or resource attributes, cannot add account tags", yaceCWM.AsSlice()...)
+								}
+							} else {
+								e.logger.Info("found aws_account on metric: "+awsAccount, yaceCWM.AsSlice()...)
+								if awsAccount != "" {
+									if awsAccount != yaceCWM.awsAccount {
+										e.logger.Warn("aws account mismatch: resource account: "+awsAccount, yaceCWM.AsSlice()...)
+									}
+								}
+							}
+
+							cwm := yaceCWM.yaceMetric
 							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								e.logger.Warn("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -385,7 +427,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								e.logger.Warn("Unsupported namespace, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
+								e.logger.Warn("Unsupported namespace, skipping tags enrichment", yaceCWM.AsSlice()...)
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
@@ -423,12 +465,12 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								e.logger.Warn("No matching resource found, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
+								e.logger.Warn("No matching resource found, skipping tags enrichment", yaceCWM.AsSlice()...)
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
 							if skip {
-								e.logger.Warn("Could not associate any resource, skipping tags enrichment", "metric", yaceCWM.PrettyLog())
+								e.logger.Warn("Could not associate any resource, skipping tags enrichment", yaceCWM.AsSlice()...)
 								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
 								continue
 							}
@@ -460,7 +502,7 @@ func (e *RecordEnhancer) addAccountTagsToMetric(summaryDataPoint *metricspb.Summ
 		return
 	}
 	if cwMetric.awsAccount == "" {
-		yaceCWM := cwMetric.yaceCWMetric
+		yaceCWM := cwMetric.yaceMetric
 		e.logger.Warn("aws_account attribute not found in metric, cannot add account tags", "namespace", yaceCWM.Namespace, "metric", yaceCWM.MetricName)
 	}
 	if accountTags, ok := accountToTagsMap[cwMetric.awsAccount]; ok {
@@ -477,7 +519,7 @@ func (e *RecordEnhancer) addAccountTagsToMetric(summaryDataPoint *metricspb.Summ
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
 // usage in the metrics associator.
 func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
-	yaceCWMetric := &model.Metric{}
+	yaceMetric := &model.Metric{}
 	var awsAccount string
 	for _, kv := range attrs {
 		var val string
@@ -486,9 +528,9 @@ func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
 		}
 		switch kv.Key {
 		case "MetricName":
-			yaceCWMetric.MetricName = val
+			yaceMetric.MetricName = val
 		case "Namespace":
-			yaceCWMetric.Namespace = val
+			yaceMetric.Namespace = val
 		case "aws_account":
 			// AWS CloudWatch adds the aws_account field to metrics in metric streams when source and monitor accounts
 			// are configured. This field identifies the AWS account ID where the metric originated, which is
@@ -500,7 +542,7 @@ func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
 				if dimensions != nil {
 					for _, keyValue := range dimensions.GetValues() {
 						if keyValue.GetValue() != nil {
-							yaceCWMetric.Dimensions = append(yaceCWMetric.Dimensions, &model.Dimension{
+							yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
 								Name:  keyValue.Key,
 								Value: keyValue.GetValue().GetStringValue(),
 							})
@@ -509,15 +551,15 @@ func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
 				}
 			}
 		default:
-			yaceCWMetric.Dimensions = append(yaceCWMetric.Dimensions, &model.Dimension{
+			yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
 				Name:  kv.Key,
 				Value: val,
 			})
 		}
 	}
 	cwm := &CloudWatchMetric{
-		yaceCWMetric: yaceCWMetric,
-		awsAccount:   awsAccount,
+		yaceMetric: yaceMetric,
+		awsAccount: awsAccount,
 	}
 	return cwm
 }
