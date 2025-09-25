@@ -116,7 +116,7 @@ func (c *CloudWatchMetricData) AsSlice() []interface{} {
 		}
 	}
 	if c.accountAttributes != nil {
-		for key, val := range c.resourceTagAttributes {
+		for key, val := range c.accountAttributes {
 			output = append(output, "account_"+key, val)
 		}
 	}
@@ -150,12 +150,6 @@ func (c *CloudWatchMetricData) SetMetricAttributes(attrs []*commonpb.KeyValue) {
 			yaceMetric.MetricName = val
 		case "Namespace":
 			yaceMetric.Namespace = val
-		case "aws_account":
-			// TODO(dan) Remove this once proven to be unnecessary.
-			// AWS CloudWatch adds the aws_account field to metrics in metric streams when source and monitor accounts
-			// are configured. This field identifies the AWS account ID where the metric originated, which is
-			// particularly useful in cross-account monitoring setups.
-			awsAccount = val
 		case "Dimensions":
 			if kv.Value != nil {
 				dimensions := kv.Value.GetKvlistValue()
@@ -529,21 +523,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 							cwmd := newCloudWatchMetricData()
 							cwmd.SetMetricAttributes(dp.Attributes)
 							cwmd.SetStreamResourceAttributes(streamResourceAttributes)
-							if cwmd.awsAccount == "" {
-								if awsAccount != "" {
-									cwmd.awsAccount = awsAccount
-								} else {
-									e.logger.Warn("aws account not found in metric or stream resource attributes, cannot add account tags", cwmd.AsSlice()...)
-								}
-							} else {
-								// TODO(dan) Remove this once proven to be unnecessary.
-								e.logger.Warn("found aws_account on metric: "+awsAccount, cwmd.AsSlice()...)
-								if awsAccount != "" {
-									if awsAccount != cwmd.awsAccount {
-										e.logger.Warn("aws account mismatch: resource account: "+awsAccount, cwmd.AsSlice()...)
-									}
-								}
-							}
+							cwmd.awsAccount = awsAccount
 
 							cwm := cwmd.yaceMetric
 							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
