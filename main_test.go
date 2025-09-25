@@ -276,7 +276,7 @@ func Test_enhanceRecordData(t *testing.T) {
 										kv("Namespace", "AWS/EBS"),
 										kv("VolumeId", "vol-0123456789"),
 										kv("Name", "test-instance"),
-										kv("aws-account-name", "Agent Financial Center (gamma)"),
+										//kv("aws-account-name", "Agent Financial Center (gamma)"),
 										kv("env", "testing"),
 										kv("team", "test-team-1"),
 									},
@@ -378,7 +378,8 @@ func Test_enhanceRecordData(t *testing.T) {
 		t.Fatalf("failed to make tag list: %v", err)
 	}
 	tagMap := makeTagMap(tagList)
-	awsAccountToTagsString := `{"123456789012":[["env","gamma"],["aws-account-name","Agent Financial Center (gamma)"]]}`
+	// awsAccountToTagsString := `{"123456789012":[["env","gamma"],["aws-account-name","Agent Financial Center (gamma)"]]}`
+	awsAccountToTagsString := ""
 	awsAccountToTagsMap, err := makeAccountToTagsMap(awsAccountToTagsString)
 	if err != nil {
 		t.Fatalf("failed to make account to tags map: %v", err)

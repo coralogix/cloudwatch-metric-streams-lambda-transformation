@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/arn"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -34,30 +33,105 @@ import (
 
 const cacheFile = "cache"
 
-type CloudWatchMetric struct {
-	resourceAttributes map[string]string
-	yaceMetric         *model.Metric
-	awsAccount         string
+type CloudWatchMetricData struct {
+	streamResourceAttributes map[string]string
+	resourceTagAttributes    map[string]string
+	accountAttributes        map[string]string
+	allAttributes            map[string]string
+	yaceMetric               *model.Metric
+	awsAccount               string
 }
 
-func (e *CloudWatchMetric) AsSlice() []interface{} {
+func (c *CloudWatchMetricData) AsSlice() []interface{} {
 	var output []interface{}
 	output = append(output,
-		"aws_account", e.awsAccount,
-		"namespace", e.yaceMetric.Namespace,
-		"metric", e.yaceMetric.MetricName)
-	if e.resourceAttributes != nil {
-		for key, val := range e.resourceAttributes {
-			output = append(output, "r_"+key, val)
+		"aws_account", c.awsAccount,
+		"namespace", c.yaceMetric.Namespace,
+		"metric", c.yaceMetric.MetricName)
+	if c.streamResourceAttributes != nil {
+		for key, val := range c.streamResourceAttributes {
+			output = append(output, "stream_"+key, val)
 		}
 	}
-	for _, d := range e.yaceMetric.Dimensions {
+	if c.resourceTagAttributes != nil {
+		for key, val := range c.resourceTagAttributes {
+			output = append(output, "resource_"+key, val)
+		}
+	}
+	if c.accountAttributes != nil {
+		for key, val := range c.resourceTagAttributes {
+			output = append(output, "account_"+key, val)
+		}
+	}
+	for _, d := range c.yaceMetric.Dimensions {
 		if d == nil {
 			continue
 		}
 		output = append(output, d.Name, d.Value)
 	}
 	return output
+}
+
+func (c *CloudWatchMetricData) SetStreamResourceAttributes(attrs map[string]string) {
+	c.streamResourceAttributes = attrs
+	for k, v := range attrs {
+		c.allAttributes[k] = v
+	}
+}
+
+func (c *CloudWatchMetricData) SetMetricAttributes(attrs []*commonpb.KeyValue) {
+	yaceMetric := &model.Metric{}
+	var awsAccount string
+	for _, kv := range attrs {
+		var val string
+		if kv.Value != nil {
+			val = kv.Value.GetStringValue()
+		}
+		c.allAttributes[kv.Key] = val
+		switch kv.Key {
+		case "MetricName":
+			yaceMetric.MetricName = val
+		case "Namespace":
+			yaceMetric.Namespace = val
+		case "aws_account":
+			// TODO(dan) Remove this once proven to be unnecessary.
+			// AWS CloudWatch adds the aws_account field to metrics in metric streams when source and monitor accounts
+			// are configured. This field identifies the AWS account ID where the metric originated, which is
+			// particularly useful in cross-account monitoring setups.
+			awsAccount = val
+		case "Dimensions":
+			if kv.Value != nil {
+				dimensions := kv.Value.GetKvlistValue()
+				if dimensions != nil {
+					for _, keyValue := range dimensions.GetValues() {
+						if keyValue.GetValue() != nil {
+							yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
+								Name:  keyValue.Key,
+								Value: keyValue.GetValue().GetStringValue(),
+							})
+						}
+					}
+				}
+			}
+		default:
+			yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
+				Name:  kv.Key,
+				Value: val,
+			})
+		}
+	}
+	c.yaceMetric = yaceMetric
+	c.awsAccount = awsAccount
+}
+
+func newCloudWatchMetricData() *CloudWatchMetricData {
+	return &CloudWatchMetricData{
+		streamResourceAttributes: make(map[string]string),
+		resourceTagAttributes:    make(map[string]string),
+		accountAttributes:        make(map[string]string),
+		allAttributes:            make(map[string]string),
+		yaceMetric:               &model.Metric{},
+	}
 }
 
 func main() {
@@ -77,7 +151,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		roles                     = []model.Role{{}} // At minimum, use the Lambda execution role.
 
 		metricsToRewriteTimestamp = make(map[string]string)
-		awsAccountToTagsMap       = make(map[string][][]string)
+		awsAccountToLabelsMap     = make(map[string][][]string)
 		awsTagToMetricLabelList   [][]string
 		awsTagToMetricLabelMap    = make(map[string]string)
 		awsTagMapIsFilter         = true
@@ -117,12 +191,12 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
-	if os.Getenv("AWS_ACCOUNTS_TO_TAGS") != "" {
-		awsTagMapString := os.Getenv("AWS_ACCOUNTS_TO_TAGS")
+	if os.Getenv("AWS_ACCOUNTS_TO_LABELS") != "" {
+		awsAccountLabelString := os.Getenv("AWS_ACCOUNTS_TO_LABELS")
 		var err error
-		if awsAccountToTagsMap, err = makeAccountToTagsMap(awsTagMapString); err != nil {
-			logger.Error(err, "Failed to parse value for AWS_ACCOUNTS_TO_TAGS, falling back to empty map")
-			awsAccountToTagsMap = map[string][][]string{}
+		if awsAccountToLabelsMap, err = makeAccountToTagsMap(awsAccountLabelString); err != nil {
+			logger.Error(err, "Failed to parse value for AWS_ACCOUNTS_TO_LABELS, falling back to empty map")
+			awsAccountToLabelsMap = map[string][][]string{}
 		}
 	}
 
@@ -168,7 +242,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 
 	recordEnhancer := NewRecordEnhancer(logger, fileCachePath, continueOnResourceFailure, resourcesCache, associatorsCache,
 		region, roles, cache, fileCacheExpiration, fileCacheEnabled, metricsToRewriteTimestamp,
-		awsTagToMetricLabelList, awsTagToMetricLabelMap, awsTagMapIsFilter, awsAccountToTagsMap)
+		awsTagToMetricLabelList, awsTagToMetricLabelMap, awsTagMapIsFilter, awsAccountToLabelsMap)
 
 	for _, record := range request.Records {
 		newData, err := recordEnhancer.enhanceRecordData(record.Data)
@@ -208,7 +282,7 @@ type RecordEnhancer struct {
 	awsTagToMetricLabelList   [][]string
 	awsTagToMetricLabelMap    map[string]string
 	awsTagMapIsFilter         bool
-	awsAccountToTagsMap       map[string][][]string
+	awsAccountToLabelsMap     map[string][][]string
 }
 
 func NewRecordEnhancer(
@@ -226,7 +300,7 @@ func NewRecordEnhancer(
 	awsTagToMetricLabelList [][]string,
 	awsTagToMetricLabelMap map[string]string,
 	awsTagMapIsFilter bool,
-	awsAccountToTagsMap map[string][][]string,
+	awsAccountToLabelsMap map[string][][]string,
 ) *RecordEnhancer {
 	return &RecordEnhancer{
 		logger:                    logger,
@@ -243,7 +317,7 @@ func NewRecordEnhancer(
 		awsTagToMetricLabelList:   awsTagToMetricLabelList,
 		awsTagToMetricLabelMap:    awsTagToMetricLabelMap,
 		awsTagMapIsFilter:         awsTagMapIsFilter,
-		awsAccountToTagsMap:       awsAccountToTagsMap,
+		awsAccountToLabelsMap:     awsAccountToLabelsMap,
 	}
 }
 
@@ -282,7 +356,6 @@ func (e *RecordEnhancer) getOrCacheResourcesToEFS(
 		if err != nil {
 			return nil, err
 		}
-		addAccountTagsToResources(resources, e.awsAccountToTagsMap)
 		rewriteResourceTags(resources, e.awsTagToMetricLabelList, e.awsTagToMetricLabelMap, e.awsTagMapIsFilter)
 		return resources, nil
 	}
@@ -317,7 +390,6 @@ func (e *RecordEnhancer) getOrCacheResourcesToEFS(
 		if err != nil {
 			return nil, err
 		}
-		addAccountTagsToResources(resources, e.awsAccountToTagsMap)
 		rewriteResourceTags(resources, e.awsTagToMetricLabelList, e.awsTagToMetricLabelMap, e.awsTagMapIsFilter)
 		b, err := json.Marshal(resources)
 		if err != nil {
@@ -379,7 +451,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
 
-			resourceAttributes := make(map[string]string)
+			streamResourceAttributes := make(map[string]string)
 			var awsAccount string
 			if ilms.Resource != nil && len(ilms.Resource.Attributes) > 0 {
 				for _, attr := range ilms.Resource.Attributes {
@@ -390,7 +462,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 								awsAccount = attr.Value.GetStringValue()
 							}
 						}
-						resourceAttributes[attr.Key] = attr.Value.GetStringValue()
+						streamResourceAttributes[attr.Key] = attr.Value.GetStringValue()
 					}
 				}
 			}
@@ -402,24 +474,26 @@ func (e *RecordEnhancer) enhanceRecordData(
 					// currently handle other types.
 					case *metricspb.Metric_Summary:
 						for _, dp := range t.Summary.DataPoints {
-							yaceCWM := buildCloudWatchMetric(dp.Attributes)
-							yaceCWM.resourceAttributes = resourceAttributes
-							if yaceCWM.awsAccount == "" {
+							cwmd := newCloudWatchMetricData()
+							cwmd.SetMetricAttributes(dp.Attributes)
+							cwmd.SetStreamResourceAttributes(streamResourceAttributes)
+							if cwmd.awsAccount == "" {
 								if awsAccount != "" {
-									yaceCWM.awsAccount = awsAccount
+									cwmd.awsAccount = awsAccount
 								} else {
-									e.logger.Warn("aws account not found in metric or resource attributes, cannot add account tags", yaceCWM.AsSlice()...)
+									e.logger.Warn("aws account not found in metric or stream resource attributes, cannot add account tags", cwmd.AsSlice()...)
 								}
 							} else {
-								e.logger.Info("found aws_account on metric: "+awsAccount, yaceCWM.AsSlice()...)
+								// TODO(dan) Remove this once proven to be unnecessary.
+								e.logger.Warn("found aws_account on metric: "+awsAccount, cwmd.AsSlice()...)
 								if awsAccount != "" {
-									if awsAccount != yaceCWM.awsAccount {
-										e.logger.Warn("aws account mismatch: resource account: "+awsAccount, yaceCWM.AsSlice()...)
+									if awsAccount != cwmd.awsAccount {
+										e.logger.Warn("aws account mismatch: resource account: "+awsAccount, cwmd.AsSlice()...)
 									}
 								}
 							}
 
-							cwm := yaceCWM.yaceMetric
+							cwm := cwmd.yaceMetric
 							e.logger.Debug("Processing metric", "metric", cwm.MetricName, "timestamp", dp.TimeUnixNano, "staleness", time.Since(time.Unix(0, int64(dp.TimeUnixNano))))
 							if cwm.MetricName == "" || cwm.Namespace == "" {
 								e.logger.Warn("Metric name or namespace is missing, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
@@ -427,8 +501,8 @@ func (e *RecordEnhancer) enhanceRecordData(
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								e.logger.Warn("Unsupported namespace, skipping tags enrichment", yaceCWM.AsSlice()...)
-								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
+								e.logger.Warn("Unsupported namespace, skipping tags enrichment", cwmd.AsSlice()...)
+								e.addAccountLabelsToMetric(dp, cwmd)
 								continue
 							}
 
@@ -452,7 +526,6 @@ func (e *RecordEnhancer) enhanceRecordData(
 									return nil, err
 								}
 								e.logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
-
 								e.resourceCache[cwm.Namespace] = resources
 							}
 
@@ -465,24 +538,20 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								e.logger.Warn("No matching resource found, skipping tags enrichment", yaceCWM.AsSlice()...)
-								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
+								e.logger.Warn("No matching resource found, skipping tags enrichment", cwmd.AsSlice()...)
+								e.addAccountLabelsToMetric(dp, cwmd)
 								continue
 							}
 							if skip {
-								e.logger.Warn("Could not associate any resource, skipping tags enrichment", yaceCWM.AsSlice()...)
-								e.addAccountTagsToMetric(dp, yaceCWM, e.awsAccountToTagsMap)
+								e.logger.Warn("Could not associate any resource, skipping tags enrichment", cwmd.AsSlice()...)
+								e.addAccountLabelsToMetric(dp, cwmd)
 								continue
 							}
 
-							e.logger.Debug("Found matching resource", "resource", r.ARN, "namespace", cwm.Namespace, "metric", cwm.MetricName)
+							e.addResourceTagsToMetric(dp, r.Tags, cwmd)
+							e.addAccountLabelsToMetric(dp, cwmd)
 
-							for _, tag := range r.Tags {
-								dp.Attributes = append(dp.Attributes, &commonpb.KeyValue{
-									Key:   tag.Key,
-									Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
-								})
-							}
+							e.logger.Debug("Completed tags enrichment", cwmd.AsSlice()...)
 							continue
 						}
 					default:
@@ -496,72 +565,45 @@ func (e *RecordEnhancer) enhanceRecordData(
 	return requestsIntoRawData(expMetricsReqs)
 }
 
-// addAccountTagsToMetric adds tags to the metric based on the aws_account attribute and the accountToTagsMap.
-func (e *RecordEnhancer) addAccountTagsToMetric(summaryDataPoint *metricspb.SummaryDataPoint, cwMetric *CloudWatchMetric, accountToTagsMap map[string][][]string) {
-	if len(accountToTagsMap) == 0 {
-		return
-	}
-	if cwMetric.awsAccount == "" {
-		yaceCWM := cwMetric.yaceMetric
-		e.logger.Warn("aws_account attribute not found in metric, cannot add account tags", "namespace", yaceCWM.Namespace, "metric", yaceCWM.MetricName)
-	}
-	if accountTags, ok := accountToTagsMap[cwMetric.awsAccount]; ok {
-		for _, tag := range accountTags {
+// addResourceTagsToMetric adds labels (if not already present) to the metric from the provided resource tags.
+func (e *RecordEnhancer) addResourceTagsToMetric(summaryDataPoint *metricspb.SummaryDataPoint, resourceTags []model.Tag, cwMetricData *CloudWatchMetricData) {
+	for _, tag := range resourceTags {
+		cwMetricData.resourceTagAttributes[tag.Key] = tag.Value
+		if _, found := cwMetricData.allAttributes[tag.Key]; !found {
 			summaryDataPoint.Attributes = append(summaryDataPoint.Attributes, &commonpb.KeyValue{
-				Key:   tag[0],
-				Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag[1]}},
+				Key:   tag.Key,
+				Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag.Value}},
 			})
+			cwMetricData.allAttributes[tag.Key] = tag.Value
 		}
 	}
 	return
 }
 
-// buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
-// usage in the metrics associator.
-func buildCloudWatchMetric(attrs []*commonpb.KeyValue) *CloudWatchMetric {
-	yaceMetric := &model.Metric{}
-	var awsAccount string
-	for _, kv := range attrs {
-		var val string
-		if kv.Value != nil {
-			val = kv.Value.GetStringValue()
-		}
-		switch kv.Key {
-		case "MetricName":
-			yaceMetric.MetricName = val
-		case "Namespace":
-			yaceMetric.Namespace = val
-		case "aws_account":
-			// AWS CloudWatch adds the aws_account field to metrics in metric streams when source and monitor accounts
-			// are configured. This field identifies the AWS account ID where the metric originated, which is
-			// particularly useful in cross-account monitoring setups.
-			awsAccount = val
-		case "Dimensions":
-			if kv.Value != nil {
-				dimensions := kv.Value.GetKvlistValue()
-				if dimensions != nil {
-					for _, keyValue := range dimensions.GetValues() {
-						if keyValue.GetValue() != nil {
-							yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
-								Name:  keyValue.Key,
-								Value: keyValue.GetValue().GetStringValue(),
-							})
-						}
-					}
-				}
+// addAccountLabelsToMetric adds labels (if not already present) to the metric based on the aws_account attribute and the accountToTagsMap.
+func (e *RecordEnhancer) addAccountLabelsToMetric(summaryDataPoint *metricspb.SummaryDataPoint, cwMetricData *CloudWatchMetricData) {
+	if len(e.awsAccountToLabelsMap) == 0 {
+		return
+	}
+	if cwMetricData.awsAccount == "" {
+		yaceMetric := cwMetricData.yaceMetric
+		e.logger.Warn("aws_account attribute not found in metric, cannot add account tags", "namespace", yaceMetric.Namespace, "metric", yaceMetric.MetricName)
+	}
+	if accountTags, ok := e.awsAccountToLabelsMap[cwMetricData.awsAccount]; ok {
+
+		for _, tag := range accountTags {
+			cwMetricData.accountAttributes[tag[0]] = tag[1]
+			if _, found := cwMetricData.allAttributes[tag[0]]; !found {
+				summaryDataPoint.Attributes = append(summaryDataPoint.Attributes, &commonpb.KeyValue{
+					Key:   tag[0],
+					Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: tag[1]}},
+				})
+				cwMetricData.allAttributes[tag[0]] = tag[1]
 			}
-		default:
-			yaceMetric.Dimensions = append(yaceMetric.Dimensions, &model.Dimension{
-				Name:  kv.Key,
-				Value: val,
-			})
 		}
+
 	}
-	cwm := &CloudWatchMetric{
-		yaceMetric: yaceMetric,
-		awsAccount: awsAccount,
-	}
-	return cwm
+	return
 }
 
 // rawDataIntoRequests reads the raw data from the record and decodes it into slice of ExportMetricsServiceRequests.
@@ -600,32 +642,6 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 	}
 
 	return b.Bytes(), nil
-}
-
-func addAccountTagsToResources(resources []*model.TaggedResource, accountToTagsMap map[string][][]string) {
-	if len(accountToTagsMap) == 0 {
-		return
-	}
-	for _, resource := range resources {
-		if resource == nil || resource.ARN == "" || !arn.IsARN(resource.ARN) {
-			continue
-		}
-		parsedARN, err := arn.Parse(resource.ARN)
-		if err != nil || parsedARN.AccountID == "" {
-			continue
-		}
-		if accountTags, ok := accountToTagsMap[parsedARN.AccountID]; ok {
-			resourceTags := make(map[string]string)
-			for _, tag := range resource.Tags {
-				resourceTags[tag.Key] = tag.Value
-			}
-			for _, tag := range accountTags {
-				if _, ok := resourceTags[tag[0]]; !ok {
-					resource.Tags = append(resource.Tags, model.Tag{Key: tag[0], Value: tag[1]})
-				}
-			}
-		}
-	}
 }
 
 func rewriteResourceTags(resources []*model.TaggedResource, awsTagToMetricLabelList [][]string, awsTagToMetricLabelMap map[string]string, awsTagMapIsFilter bool) {
