@@ -13,10 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients"
 	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
@@ -33,6 +34,52 @@ import (
 
 const cacheFile = "cache"
 
+type LambdaEnvVars struct {
+	secretFound bool
+	secretMap   map[string]string
+}
+
+func newLambdaEnvVars() *LambdaEnvVars {
+	return &LambdaEnvVars{
+		secretMap: make(map[string]string),
+	}
+}
+
+func (l *LambdaEnvVars) FetchSecret(secretName string) error {
+	if secretName == "" {
+		return errors.New("secret name is empty")
+	}
+	sess := session.Must(session.NewSession())
+	svc := secretsmanager.New(sess)
+	input := &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(secretName),
+	}
+	result, err := svc.GetSecretValueWithContext(context.Background(), input)
+	if err != nil {
+		return err
+	}
+	secretStr := aws.StringValue(result.SecretString)
+	err = json.Unmarshal([]byte(secretStr), &l.secretMap)
+	if err != nil {
+		return err
+	}
+	l.secretFound = true
+	return nil
+}
+
+func (l *LambdaEnvVars) GetValue(key string) string {
+	value := ""
+	if key != "" {
+		if l.secretFound {
+			if val, ok := l.secretMap[key]; ok {
+				return val
+			}
+		}
+		value = os.Getenv(key)
+	}
+	return value
+}
+
 type CloudWatchMetricData struct {
 	streamResourceAttributes map[string]string
 	resourceTagAttributes    map[string]string
@@ -40,6 +87,16 @@ type CloudWatchMetricData struct {
 	allAttributes            map[string]string
 	yaceMetric               *model.Metric
 	awsAccount               string
+}
+
+func newCloudWatchMetricData() *CloudWatchMetricData {
+	return &CloudWatchMetricData{
+		streamResourceAttributes: make(map[string]string),
+		resourceTagAttributes:    make(map[string]string),
+		accountAttributes:        make(map[string]string),
+		allAttributes:            make(map[string]string),
+		yaceMetric:               &model.Metric{},
+	}
 }
 
 func (c *CloudWatchMetricData) AsSlice() []interface{} {
@@ -124,16 +181,6 @@ func (c *CloudWatchMetricData) SetMetricAttributes(attrs []*commonpb.KeyValue) {
 	c.awsAccount = awsAccount
 }
 
-func newCloudWatchMetricData() *CloudWatchMetricData {
-	return &CloudWatchMetricData{
-		streamResourceAttributes: make(map[string]string),
-		resourceTagAttributes:    make(map[string]string),
-		accountAttributes:        make(map[string]string),
-		allAttributes:            make(map[string]string),
-		yaceMetric:               &model.Metric{},
-	}
-}
-
 func main() {
 	lambda.Start(lambdaHandler)
 }
@@ -160,17 +207,22 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		responseRecords           = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
 
+	envVars := newLambdaEnvVars()
+	if err := envVars.FetchSecret(os.Getenv("AWS_SECRET_NAME")); err != nil {
+		logger.Error(err, "Failed to fetch secret, falling back to env vars only")
+	}
+
 	// Override the default continueOnResourceFailure value if the env var is set.
-	if os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "false" {
+	if envVars.GetValue("CONTINUE_ON_RESOURCE_FAILURE") == "false" {
 		continueOnResourceFailure = false
 	}
 
-	if os.Getenv("FILE_CACHE_ENABLED") == "false" {
+	if envVars.GetValue("FILE_CACHE_ENABLED") == "false" {
 		fileCacheEnabled = false
 	}
 
-	if os.Getenv("FILE_CACHE_EXPIRATION") != "" {
-		d, err := time.ParseDuration(os.Getenv("FILE_CACHE_EXPIRATION"))
+	if envVars.GetValue("FILE_CACHE_EXPIRATION") != "" {
+		d, err := time.ParseDuration(envVars.GetValue("FILE_CACHE_EXPIRATION"))
 		if err != nil {
 			logger.Error(err, "Failed to parse value for EFS cache expiration, falling back to default 1h")
 		} else {
@@ -178,12 +230,12 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
-	if os.Getenv("FILE_CACHE_PATH") != "" {
-		fileCachePath = os.Getenv("FILE_CACHE_PATH")
+	if envVars.GetValue("FILE_CACHE_PATH") != "" {
+		fileCachePath = envVars.GetValue("FILE_CACHE_PATH")
 	}
 
-	if os.Getenv("METRICS_TO_REWRITE_TIMESTAMP") != "" {
-		awsMetricsToRewriteTimestampString := os.Getenv("METRICS_TO_REWRITE_TIMESTAMP")
+	if envVars.GetValue("METRICS_TO_REWRITE_TIMESTAMP") != "" {
+		awsMetricsToRewriteTimestampString := envVars.GetValue("METRICS_TO_REWRITE_TIMESTAMP")
 		var err error
 		if metricsToRewriteTimestamp, err = makeMetricsToRewriteMap(awsMetricsToRewriteTimestampString); err != nil {
 			logger.Error(err, "Failed to parse value for METRICS_TO_REWRITE_TIMESTAMP, falling back to empty map")
@@ -191,8 +243,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
-	if os.Getenv("AWS_ACCOUNTS_TO_LABELS") != "" {
-		awsAccountLabelString := os.Getenv("AWS_ACCOUNTS_TO_LABELS")
+	if envVars.GetValue("AWS_ACCOUNTS_TO_LABELS") != "" {
+		awsAccountLabelString := envVars.GetValue("AWS_ACCOUNTS_TO_LABELS")
 		var err error
 		if awsAccountToLabelsMap, err = makeAccountToTagsMap(awsAccountLabelString); err != nil {
 			logger.Error(err, "Failed to parse value for AWS_ACCOUNTS_TO_LABELS, falling back to empty map")
@@ -200,8 +252,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
-	if os.Getenv("AWS_TAG_NAME_TO_METRIC_LABEL") != "" {
-		awsTagMapString := os.Getenv("AWS_TAG_NAME_TO_METRIC_LABEL")
+	if envVars.GetValue("AWS_TAG_NAME_TO_METRIC_LABEL") != "" {
+		awsTagMapString := envVars.GetValue("AWS_TAG_NAME_TO_METRIC_LABEL")
 		var err error
 		if awsTagToMetricLabelList, err = makeTagList(awsTagMapString); err != nil {
 			logger.Error(err, "Failed to parse value for AWS_TAG_NAME_TO_METRIC_LABEL, falling back to empty list")
@@ -215,13 +267,13 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
-	if os.Getenv("AWS_TAG_NAME_IS_FILTER") == "false" {
+	if envVars.GetValue("AWS_TAG_NAME_IS_FILTER") == "false" {
 		awsTagMapIsFilter = false
 	}
 
-	if os.Getenv("AWS_ROLE_TO_ASSUME") != "" && os.Getenv("AWS_ACCOUNTS_TO_SEARCH") != "" {
-		roleString := os.Getenv("AWS_ROLE_TO_ASSUME")
-		accountsString := os.Getenv("AWS_ACCOUNTS_TO_SEARCH")
+	if envVars.GetValue("AWS_ROLE_TO_ASSUME") != "" && envVars.GetValue("AWS_ACCOUNTS_TO_SEARCH") != "" {
+		roleString := envVars.GetValue("AWS_ROLE_TO_ASSUME")
+		accountsString := envVars.GetValue("AWS_ACCOUNTS_TO_SEARCH")
 		roles = makeRoleArns(roleString, accountsString)
 	}
 
@@ -501,8 +553,8 @@ func (e *RecordEnhancer) enhanceRecordData(
 							}
 							svc := config.SupportedServices.GetService(cwm.Namespace)
 							if svc == nil {
-								e.logger.Warn("Unsupported namespace, skipping tags enrichment", cwmd.AsSlice()...)
 								e.addAccountLabelsToMetric(dp, cwmd)
+								e.logger.Warn("Unsupported namespace, skipping tags enrichment", cwmd.AsSlice()...)
 								continue
 							}
 
@@ -538,13 +590,13 @@ func (e *RecordEnhancer) enhanceRecordData(
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil {
-								e.logger.Warn("No matching resource found, skipping tags enrichment", cwmd.AsSlice()...)
 								e.addAccountLabelsToMetric(dp, cwmd)
+								e.logger.Warn("No matching resource found, skipping tags enrichment", cwmd.AsSlice()...)
 								continue
 							}
 							if skip {
-								e.logger.Warn("Could not associate any resource, skipping tags enrichment", cwmd.AsSlice()...)
 								e.addAccountLabelsToMetric(dp, cwmd)
+								e.logger.Warn("Could not associate any resource, skipping tags enrichment", cwmd.AsSlice()...)
 								continue
 							}
 
