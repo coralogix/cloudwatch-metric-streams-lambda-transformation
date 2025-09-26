@@ -107,17 +107,17 @@ func (c *CloudWatchMetricData) AsSlice() []interface{} {
 		"metric", c.yaceMetric.MetricName)
 	if c.streamResourceAttributes != nil {
 		for key, val := range c.streamResourceAttributes {
-			output = append(output, "stream_"+key, val)
+			output = append(output, "stream/"+key, val)
 		}
 	}
 	if c.resourceTagAttributes != nil {
 		for key, val := range c.resourceTagAttributes {
-			output = append(output, "resource_"+key, val)
+			output = append(output, "resource/"+key, val)
 		}
 	}
 	if c.accountAttributes != nil {
 		for key, val := range c.accountAttributes {
-			output = append(output, "account_"+key, val)
+			output = append(output, "account/"+key, val)
 		}
 	}
 	for _, d := range c.yaceMetric.Dimensions {
