@@ -583,7 +583,7 @@ func (e *RecordEnhancer) enhanceRecordData(
 							e.addResourceTagsToMetric(dp, r.Tags, cwmd)
 							e.addAccountLabelsToMetric(dp, cwmd)
 
-							e.logger.Debug("Completed tags enrichment", cwmd.AsSlice()...)
+							e.logger.Info("Completed tags enrichment", cwmd.AsSlice()...)
 							continue
 						}
 					default:
