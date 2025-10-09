@@ -75,7 +75,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	if os.Getenv("STATIC_LABELS") != "" {
 		staticLabelsEnv := os.Getenv("STATIC_LABELS")
 		var staticLabelsJSON []string
-		err := json.Unmarshal([]byte(staticLabelsEnv), &staticLabels)
+		err := json.Unmarshal([]byte(staticLabelsEnv), &staticLabelsJSON)
 		if err != nil {
 			logger.Error(err, "Failed to parse JSON string from STATIC_LABELS")
 		} else {
