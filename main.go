@@ -43,6 +43,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCacheEnabled          = true
 		fileCacheExpiration       = 1 * time.Hour
 		fileCachePath             = "/tmp"
+		staticLabels              = make(map[string]string)
 
 		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
@@ -71,6 +72,33 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath = os.Getenv("FILE_CACHE_PATH")
 	}
 
+	if os.Getenv("STATIC_LABELS") != "" {
+		staticLabelsEnv := os.Getenv("STATIC_LABELS")
+		var staticLabelsJSON []string
+		err := json.Unmarshal([]byte(staticLabelsEnv), &staticLabels)
+		if err != nil {
+			logger.Error(err, "Failed to parse JSON string from STATIC_LABELS")
+		} else {
+			// Overly cautious: verify all elements are strings (this is implicit with []string, but let's be explicit)
+			// Then, split the label into a map on the '=' character
+			for _, label := range staticLabelsJSON {
+				if label == "" {
+					logger.Error(err, "STATIC_LABELS contains empty string")
+					break
+				}
+				if !strings.Contains(label, "=") {
+					logger.Error(err, "STATIC_LABELS contains string that is not a key=value pair")
+					break
+				}
+			}
+			for _, label := range staticLabelsJSON {
+				// Split only after the first '=' character, in case the value also contains an '=' character
+				key, value := strings.Split(label, "=")[0], strings.SplitN(label, "=", 2)[1]
+				staticLabels[key] = value
+			}
+		}
+	}
+
 	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
@@ -92,7 +120,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, staticLabels)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -199,6 +227,7 @@ func enhanceRecordData(
 	client tagging.Client,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
+	staticLabels map[string]string,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -260,6 +289,12 @@ func enhanceRecordData(
 								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
 									Key:   tag.Key,
 									Value: tag.Value,
+								})
+							}
+							for k, v := range staticLabels {
+								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
+									Key:   k,
+									Value: v,
 								})
 							}
 						}
