@@ -1,14 +1,24 @@
  # CloudWatch Metric Streams Lambda transformation
 
 ## About The Project
-This Lambda function can be used as a Kinesis Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.
+This Lambda function can be used as a Data Firehose transformation function, to enrich the metrics from CloudWatch Metric Streams with AWS resource tags.
 
-- Accepts Kinesis Firehose events with metric data in [OTLP v0.7, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html)
+- Accepts Data Firehose events with metric data in [OTLP v0.7, size-delimited format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-metric-streams-formats-opentelemetry.html)
 - Obtains AWS resource information through the [AWS tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/overview.html) and related APIs (API Gateway, EC2...)
 - Associates CloudWatch metrics with particular resources and enriches the metric labels with resource tags, based on the [Yet Another CloudWatch Exporter](https://github.com/nerdswords/yet-another-cloudwatch-exporter) library
-- Returns Kinesis Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Kinesis stream
+- Returns Data Firehose response with transformed record in OTLP v0.7, size-delimited format, for further processing and exporting to Coralogix (or other) destination by the Firehose stream
 
-### Installation and usage
+### Automated Installation
+
+This Lambda function gets deployed as a part of [AWS CloudWatch Metric Streams with Amazon Data Firehose](https://coralogix.com/docs/integrations/aws/amazon-data-firehose/aws-cloudwatch-metric-streams-with-amazon-data-firehose/#transformation-lambda) Coralogix integration.
+
+To install it automatically, you have a choice of 3 options:
+
+1. [Coralogix UI Integration](https://coralogix.com/docs/integrations/aws/amazon-data-firehose/aws-cloudwatch-metric-streams-with-amazon-data-firehose/#configuration) (uses CloudFormation)
+2. [CloudFormation Template](https://github.com/coralogix/cloudformation-coralogix-aws/blob/master/aws-integrations/firehose-metrics/template.yaml)
+3. [Terraform Module](https://github.com/coralogix/terraform-coralogix-aws/tree/master/examples/firehose-metrics)
+
+### Manual Installation
 1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Custom runtime on Amazon Linux 2`
@@ -18,9 +28,9 @@ This Lambda function can be used as a Kinesis Firehose transformation function, 
 4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processinr, see if you need to increase it.
 5. Adjust the role of the Lambda function as described below in section [Necessary permissions](###necessary-permissions).
 6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](###configuration) section.
-7. The Lambda function is ready to be used as in [Kinesis Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Kinesis Data Firehose configuration.
+7. The Lambda function is ready to be used as in [Amazon Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Amazon Data Firehose configuration.
 
-Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Kinesis Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinsis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
+Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Amazon Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinsis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
 
 ## Migrating from `Go 1.x` runtime to custom runtime on Amazon Linux 2
 Please beware that the `Go 1.x` runtime will be [deprecated](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/) at the end of December 2023. If you were previously using this Lambda function with the `Go 1.x`, you will need to migrate the function in accordance with the instructions in the [AWS documentation](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/).
@@ -31,7 +41,7 @@ There is a couple of configuration options that can be set via environment varia
 | Environment variable             | Default |Possible values   | Description   |
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
-| `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Kinesis Data Firehose.
+| `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Amazon Data Firehose.
 | `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
 | `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
 | `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
