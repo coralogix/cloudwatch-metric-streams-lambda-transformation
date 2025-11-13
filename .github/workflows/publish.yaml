@@ -15,7 +15,8 @@ permissions:
   contents: write
 
 env:
-  BUCKET_BASE_NAME: ${{ vars.BUCKET_BASE_NAME }}
+  AWS_SERVERLESS_BUCKET: coralogix-serverless-repo
+  AWS_DEFAULT_REGION: eu-central-1
 
 jobs:
   publish:
@@ -37,7 +38,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.S3_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Publish to S3
         run: make publish
@@ -46,4 +47,4 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           draft: true
-          files: bootstrap.zip
+          files: firehose-metrics-transformer.zip
