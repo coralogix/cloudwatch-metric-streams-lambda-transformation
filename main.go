@@ -44,6 +44,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCacheExpiration       = 1 * time.Hour
 		fileCachePath             = "/tmp"
 		staticLabels              = make(map[string]string)
+		defaultLabels             = false
 
 		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
@@ -99,6 +100,10 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		}
 	}
 
+	if os.Getenv("DEFAULT_LABELS") == "true" {
+		defaultLabels = true
+	}
+
 	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
@@ -120,7 +125,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, staticLabels)
+		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
 		if err != nil {
 			logger.Error(err, "Failed to enhance record data")
 			return nil, err
@@ -228,6 +233,7 @@ func enhanceRecordData(
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
 	staticLabels map[string]string,
+	defaultLabels bool,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -276,12 +282,21 @@ func enhanceRecordData(
 							}
 
 							r, skip := asc.AssociateMetricToResource(cwm)
-							if r == nil {
-								logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
-								continue
-							}
-							if skip {
-								logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+							if r == nil || skip {
+								if r == nil {
+									logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								} else {
+									logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+								}
+								// If defaultLabels is enabled, add static labels even when resource tags are absent
+								if defaultLabels {
+									for k, v := range staticLabels {
+										dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
+											Key:   k,
+											Value: v,
+										})
+									}
+								}
 								continue
 							}
 
