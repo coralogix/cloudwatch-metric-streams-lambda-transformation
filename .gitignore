@@ -1,3 +1,4 @@
 *.zip
 function
 bootstrap
+cloudwatch-streams-lambda-enhancement
