@@ -45,6 +45,8 @@ There is a couple of configuration options that can be set via environment varia
 | `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
 | `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
 | `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| `STATIC_LABELS`                  |         | `<json_array>`   | JSON array of key=value pairs to add as static labels to metrics. Example: `["env=production","team=platform"]`.
+| `DEFAULT_LABELS`                 | `false` | `true`           | When enabled, static labels are added to all metrics even if resource tags cannot be resolved. Acts as a fallback mechanism for consistent labeling across all metrics.
 
 ### Necessary permissions
 The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:

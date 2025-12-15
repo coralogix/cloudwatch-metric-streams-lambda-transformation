@@ -144,7 +144,7 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 		t.Fatalf("failed to create test data: %v", err)
 	}
 
-	got, err := enhanceRecordData(l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false, make(map[string]string))
+	got, err := enhanceRecordData(l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false, make(map[string]string), false)
 	if err != nil {
 		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
 		return
@@ -169,6 +169,7 @@ func Test_enhanceRecordData(t *testing.T) {
 		wantMetrics               []*metricspb.Metric
 		wantErr                   error
 		staticLabels              map[string]string
+		defaultLabels             bool
 	}{
 		{
 			name: "OK case with defaults (AWS/EBS)",
@@ -513,6 +514,84 @@ func Test_enhanceRecordData(t *testing.T) {
 			continueOnResourceFailure: true,
 			staticLabels:              make(map[string]string),
 		},
+		{
+			name: "With DEFAULT_LABELS enabled and no resource found - static labels added (AWS/EBS)",
+			testMetrics: []*metricspb.Metric{
+				{
+					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
+					Unit: "Bytes",
+					Data: &metricspb.Metric_DoubleSummary{
+						DoubleSummary: &metricspb.DoubleSummary{
+							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+								{
+									Labels: []*commonpb.StringKeyValue{
+										{
+											Key:   "MetricName",
+											Value: "VolumeWriteBytes",
+										},
+										{
+											Key:   "Namespace",
+											Value: "AWS/EBS",
+										},
+										{
+											Key:   "VolumeId",
+											Value: "vol-notfound",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			resourceTagMapping: []*resourcegroupstaggingapi.ResourceTagMapping{
+				{
+					ResourceARN: aws.String("arn:aws:ec2:us-east-1:123456789012:volume/vol-different"),
+					Tags: []*resourcegroupstaggingapi.Tag{
+						{
+							Key:   aws.String("Name"),
+							Value: aws.String("test-instance"),
+						},
+					},
+				},
+			},
+			wantMetrics: []*metricspb.Metric{
+				{
+					Name: "amazonaws.com/AWS/EBS/VolumeWriteBytes",
+					Unit: "Bytes",
+					Data: &metricspb.Metric_DoubleSummary{
+						DoubleSummary: &metricspb.DoubleSummary{
+							DataPoints: []*metricspb.DoubleSummaryDataPoint{
+								{
+									Labels: []*commonpb.StringKeyValue{
+										{
+											Key:   "MetricName",
+											Value: "VolumeWriteBytes",
+										},
+										{
+											Key:   "Namespace",
+											Value: "AWS/EBS",
+										},
+										{
+											Key:   "VolumeId",
+											Value: "vol-notfound",
+										},
+										{
+											Key:   "staticLabel",
+											Value: "staticValue",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			staticLabels: map[string]string{
+				"staticLabel": "staticValue",
+			},
+			defaultLabels: true,
+		},
 	}
 
 	for _, tt := range testCases {
@@ -538,7 +617,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false, tt.staticLabels)
+			got, err := enhanceRecordData(l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), mockClient, 1*time.Hour, false, tt.staticLabels, tt.defaultLabels)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
