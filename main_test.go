@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"reflect"
 	"testing"
@@ -13,11 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
-	taggingv1 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
+	taggingv1 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -123,7 +124,7 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 func Test_enhanceRecordData_NMetrics(t *testing.T) {
 	testMetrics, resourceTagMapping, wantMetrics := generateMetrics(8000)
 
-	l := logging.NewNopLogger()
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockResourcesCache := make(map[string][]*model.TaggedResource)
 	mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 	mockClient := taggingv1.NewClient(
@@ -595,7 +596,7 @@ func Test_enhanceRecordData(t *testing.T) {
 	}
 
 	for _, tt := range testCases {
-		l := logging.NewNopLogger()
+		l := slog.New(slog.NewTextHandler(io.Discard, nil))
 		mockResourcesCache := make(map[string][]*model.TaggedResource)
 		mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 		mockClient := taggingv1.NewClient(
@@ -689,7 +690,7 @@ func Test_getOrCacheResources(t *testing.T) {
 			mrg := mockResurcesGetter{
 				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
 			}
-			got, err := getOrCacheResourcesToEFS(logging.NewNopLogger(), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour, true)
+			got, err := getOrCacheResourcesToEFS(slog.New(slog.NewTextHandler(io.Discard, nil)), mrg, ".", tc.namespace, aws.String("us-east-1"), 1*time.Hour, true)
 			if err != nil {
 				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
 			}

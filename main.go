@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -14,12 +16,11 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/tagging"
-	clientsv2 "github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/clients/v2"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/config"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/logging"
-	"github.com/nerdswords/yet-another-cloudwatch-exporter/pkg/model"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
+	clientsv2 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/v2"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/config"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -63,7 +64,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	if os.Getenv("FILE_CACHE_EXPIRATION") != "" {
 		d, err := time.ParseDuration(os.Getenv("FILE_CACHE_EXPIRATION"))
 		if err != nil {
-			logger.Error(err, "Failed to parse value for EFS cache expiration, falling back to default 1h")
+			logger.Error("Failed to parse value for EFS cache expiration, falling back to default 1h", "error", err)
 		} else {
 			fileCacheExpiration = d
 		}
@@ -78,17 +79,17 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		var staticLabelsJSON []string
 		err := json.Unmarshal([]byte(staticLabelsEnv), &staticLabelsJSON)
 		if err != nil {
-			logger.Error(err, "Failed to parse JSON string from STATIC_LABELS")
+			logger.Error("Failed to parse JSON string from STATIC_LABELS", "error", err)
 		} else {
 			// Overly cautious: verify all elements are strings (this is implicit with []string, but let's be explicit)
 			// Then, split the label into a map on the '=' character
 			for _, label := range staticLabelsJSON {
 				if label == "" {
-					logger.Error(err, "STATIC_LABELS contains empty string")
+					logger.Error("STATIC_LABELS contains empty string")
 					break
 				}
 				if !strings.Contains(label, "=") {
-					logger.Error(err, "STATIC_LABELS contains string that is not a key=value pair")
+					logger.Error("STATIC_LABELS contains string that is not a key=value pair")
 					break
 				}
 			}
@@ -116,7 +117,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		},
 	}, false)
 	if err != nil {
-		logger.Error(err, "Failed to create a new cache client")
+		logger.Error("Failed to create a new cache client", "error", err)
 		return nil, err
 	}
 	cache.Refresh()
@@ -127,7 +128,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	for _, record := range request.Records {
 		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
 		if err != nil {
-			logger.Error(err, "Failed to enhance record data")
+			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
 		}
 
@@ -146,7 +147,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
+func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
 	// If cacheEnabled is false, don't cache.
 	if !cacheEnabled {
 		return retrieveResources(namespace, region, client)
@@ -210,7 +211,7 @@ func getOrCacheResourcesToEFS(logger logging.Logger, client tagging.Client, file
 
 func retrieveResources(namespace string, region *string, client tagging.Client) ([]*model.TaggedResource, error) {
 	resources, err := client.GetResources(context.Background(), model.DiscoveryJob{
-		Type: namespace,
+		Namespace: namespace,
 	}, *region)
 	if err != nil && err != tagging.ErrExpectedToFindResources {
 		return nil, err
@@ -222,7 +223,7 @@ func retrieveResources(namespace string, region *string, client tagging.Client) 
 // enchanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
 func enhanceRecordData(
-	logger logging.Logger,
+	logger *slog.Logger,
 	fileCachePath string,
 	continueOnResourceFailure bool,
 	data []byte,
@@ -264,7 +265,7 @@ func enhanceRecordData(
 							if _, ok := resourceCache[cwm.Namespace]; !ok {
 								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
-									logger.Error(err, "Failed to get resources for namespace", "namespace", cwm.Namespace)
+									logger.Error("Failed to get resources for namespace", "namespace", cwm.Namespace, "error", err)
 									if continueOnResourceFailure {
 										continue
 									}
@@ -277,7 +278,7 @@ func enhanceRecordData(
 							asc, ok := associatorCache[cwm.Namespace]
 							if !ok {
 								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
-								asc = maxdimassociator.NewAssociator(logger, svc.DimensionRegexps, resourceCache[cwm.Namespace])
+								asc = maxdimassociator.NewAssociator(logger, svc.ToModelDimensionsRegexp(), resourceCache[cwm.Namespace])
 								associatorCache[cwm.Namespace] = asc
 							}
 
@@ -314,7 +315,7 @@ func enhanceRecordData(
 							}
 						}
 					default:
-						logger.Debug("Unsupported metric type", t)
+						logger.Debug("Unsupported metric type", "type", fmt.Sprintf("%T", t))
 					}
 				}
 			}
@@ -336,7 +337,7 @@ func buildCloudWatchMetric(ll []*commonpb.StringKeyValue) *model.Metric {
 		case "Namespace":
 			cwm.Namespace = l.Value
 		default:
-			cwm.Dimensions = append(cwm.Dimensions, &model.Dimension{
+			cwm.Dimensions = append(cwm.Dimensions, model.Dimension{
 				Name:  l.Key,
 				Value: l.Value,
 			})
@@ -384,6 +385,13 @@ func requestsIntoRawData(reqs []*metricsservicepb.ExportMetricsServiceRequest) (
 	return b.Bytes(), nil
 }
 
-func newLogger(level string) logging.Logger {
-	return logging.NewLogger("json", level == "debug")
+func newLogger(level string) *slog.Logger {
+	logLevel := slog.LevelInfo
+	if level == "debug" {
+		logLevel = slog.LevelDebug
+	}
+	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})
+	return slog.New(handler)
 }

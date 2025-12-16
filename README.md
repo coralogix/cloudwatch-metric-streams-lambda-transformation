@@ -67,8 +67,10 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
         "dms:DescribeReplicationTasks",
         "ec2:DescribeTransitGatewayAttachments",
         "ec2:DescribeSpotFleetRequests",
+        "shield:ListProtections",
         "storagegateway:ListGateways",
-        "storagegateway:ListTagsForResource"
+        "storagegateway:ListTagsForResource",
+        "iam:ListAccountAliases"
       ],
       "Effect": "Allow",
       "Resource": "*"
