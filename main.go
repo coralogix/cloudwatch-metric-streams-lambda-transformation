@@ -10,9 +10,12 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsv2config "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -29,6 +32,14 @@ import (
 )
 
 const cacheFile = "cache"
+
+var (
+	// Cross-account role infrastructure for tag enrichment
+	crossAccountCaches map[string]*clientsv2.CachingFactory // accountID -> cache
+	crossAccountRoles  map[string]string                    // accountID -> roleARN
+	currentAccountID   string
+	cacheMutex         sync.RWMutex
+)
 
 func main() {
 	lambda.Start(lambdaHandler)
@@ -51,6 +62,14 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
 		responseRecords         = make([]events.KinesisFirehoseResponseRecord, 0, len(request.Records))
 	)
+
+	// Initialize cross-account role infrastructure (once per Lambda container)
+	if crossAccountCaches == nil {
+		if err := initializeCrossAccountRoles(ctx, logger, *region); err != nil {
+			logger.Error("Failed to initialize cross-account roles", "error", err)
+			// Continue without cross-account enrichment
+		}
+	}
 
 	// Override the default continueOnResourceFailure value if the env var is set.
 	if os.Getenv("CONTINUE_ON_RESOURCE_FAILURE") == "false" {
@@ -122,11 +141,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}
 	cache.Refresh()
 
-	// For now use the same concurrency as upstream implementation.
-	clientTag := cache.GetTaggingClient(*region, model.Role{}, 5)
-
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, clientTag, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
+		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
 		if err != nil {
 			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
@@ -147,13 +163,17 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCachePath, namespace string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
+func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCachePath, namespace, accountID string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
 	// If cacheEnabled is false, don't cache.
 	if !cacheEnabled {
-		return retrieveResources(namespace, region, client)
+		logger.Info("Cache disabled, fetching resources directly", "namespace", namespace)
+		resources, err := retrieveResources(namespace, region, client)
+		logger.Info("Resources fetched", "namespace", namespace, "count", len(resources), "error", err)
+		return resources, err
 	}
 
-	filePath := fileCachePath + "/" + cacheFile + "-" + strings.ReplaceAll(namespace, "/", "-")
+	// Make file cache account-aware to prevent cross-account cache collisions
+	filePath := fileCachePath + "/" + cacheFile + "-" + accountID + "-" + strings.ReplaceAll(namespace, "/", "-")
 
 	f, err := os.Open(filePath)
 	// If we cannot retrieve and it's not not found error, terminate.
@@ -171,8 +191,9 @@ func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCa
 	}
 
 	if os.IsNotExist(err) || isExpired {
-		logger.Debug("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
+		logger.Info("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
 		resources, err := retrieveResources(namespace, region, client)
+		logger.Info("Resources retrieved from API", "namespace", namespace, "count", len(resources), "error", err)
 		if err != nil {
 			return nil, err
 		}
@@ -220,9 +241,10 @@ func retrieveResources(namespace string, region *string, client tagging.Client) 
 	return resources, nil
 }
 
-// enchanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
+// enhanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
 // looks up the resources for the metrics and adds the tags to the metrics.
 func enhanceRecordData(
+	ctx context.Context,
 	logger *slog.Logger,
 	fileCachePath string,
 	continueOnResourceFailure bool,
@@ -230,7 +252,7 @@ func enhanceRecordData(
 	resourceCache map[string][]*model.TaggedResource,
 	associatorCache map[string]maxdimassociator.Associator,
 	region *string,
-	client tagging.Client,
+	defaultCache *clientsv2.CachingFactory,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
 	staticLabels map[string]string,
@@ -243,6 +265,31 @@ func enhanceRecordData(
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
+			// Extract cloud.account.id from Resource attributes for cross-account enrichment
+			var sourceAccountID string
+			// Extract cloud.account.id from Resource attributes for cross-account enrichment
+			if ilms.Resource != nil && len(ilms.Resource.Attributes) > 0 {
+				for _, attr := range ilms.Resource.Attributes {
+					if attr.Key == "cloud.account.id" {
+						sourceAccountID = attr.GetValue().GetStringValue()
+						logger.Debug("Found cloud.account.id in Resource", "accountID", sourceAccountID)
+						break
+					}
+				}
+			}
+
+			// Get the appropriate tagging client for this account
+			// This enables cross-account resource tag enrichment
+			client := getTaggingClientForAccount(sourceAccountID, *region, logger, defaultCache)
+			if sourceAccountID != "" && sourceAccountID != currentAccountID {
+				logger.Info("Using cross-account tagging client", "accountID", sourceAccountID)
+			}
+
+			// If client is nil (e.g., in tests), skip resource enrichment but process metrics
+			if client == nil {
+				logger.Debug("Tagging client is nil, skipping resource enrichment")
+			}
+
 			for _, ilm := range ilms.InstrumentationLibraryMetrics {
 				for _, metric := range ilm.Metrics {
 					switch t := metric.Data.(type) {
@@ -262,8 +309,10 @@ func enhanceRecordData(
 								continue
 							}
 
-							if _, ok := resourceCache[cwm.Namespace]; !ok {
-								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, region, fileCacheExpiration, fileCacheEnabled)
+							// Use account-aware cache key so each account has its own resource cache
+							cacheKey := fmt.Sprintf("%s:%s", sourceAccountID, cwm.Namespace)
+							if _, ok := resourceCache[cacheKey]; !ok && client != nil {
+								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, sourceAccountID, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error("Failed to get resources for namespace", "namespace", cwm.Namespace, "error", err)
 									if continueOnResourceFailure {
@@ -271,23 +320,35 @@ func enhanceRecordData(
 									}
 									return nil, err
 								}
-								logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace)
-								resourceCache[cwm.Namespace] = resources
+								// Log first few resource ARNs for debugging
+								sampleARNs := ""
+								for i, res := range resources {
+									if i < 3 {
+										sampleARNs += res.ARN + " "
+									}
+								}
+								logger.Info("Caching GetResources result for namespace locally", "namespace", cwm.Namespace, "resourceCount", len(resources), "accountID", sourceAccountID, "cacheKey", cacheKey, "sampleARNs", sampleARNs)
+								resourceCache[cacheKey] = resources
 							}
 
-							asc, ok := associatorCache[cwm.Namespace]
+							asc, ok := associatorCache[cacheKey]
 							if !ok {
-								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace)
-								asc = maxdimassociator.NewAssociator(logger, svc.ToModelDimensionsRegexp(), resourceCache[cwm.Namespace])
-								associatorCache[cwm.Namespace] = asc
+								logger.Debug("Building and locally caching associator", "namespace", cwm.Namespace, "cacheKey", cacheKey)
+								asc = maxdimassociator.NewAssociator(logger, svc.ToModelDimensionsRegexp(), resourceCache[cacheKey])
+								associatorCache[cacheKey] = asc
 							}
 
 							r, skip := asc.AssociateMetricToResource(cwm)
 							if r == nil || skip {
 								if r == nil {
-									logger.Debug("No matching resource found, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+									// Log dimensions to debug association failure
+									dimensionsStr := ""
+									for k, v := range cwm.Dimensions {
+										dimensionsStr += fmt.Sprintf("%v=%v ", k, v)
+									}
+									logger.Info("No matching resource found for metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID, "dimensions", dimensionsStr)
 								} else {
-									logger.Debug("Could not associate any resource, skipping tags enrichment", "namespace", cwm.Namespace, "metric", cwm.MetricName)
+									logger.Info("Could not associate resource to metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID)
 								}
 								// If defaultLabels is enabled, add static labels even when resource tags are absent
 								if defaultLabels {
@@ -301,6 +362,7 @@ func enhanceRecordData(
 								continue
 							}
 
+							logger.Info("Enriching metric with resource tags", "namespace", cwm.Namespace, "metric", cwm.MetricName, "tagCount", len(r.Tags), "accountID", sourceAccountID)
 							for _, tag := range r.Tags {
 								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
 									Key:   tag.Key,
@@ -394,4 +456,104 @@ func newLogger(level string) *slog.Logger {
 		Level: logLevel,
 	})
 	return slog.New(handler)
+}
+
+// ============================================================================
+// Cross-Account Tag Enrichment
+// ============================================================================
+
+// initializeCrossAccountRoles sets up caches and clients for cross-account tag enrichment
+func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, region string) error {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	// Already initialized
+	if crossAccountCaches != nil {
+		return nil
+	}
+
+	crossAccountCaches = make(map[string]*clientsv2.CachingFactory)
+	crossAccountRoles = make(map[string]string)
+
+	// Get current account ID using STS
+	cfg, err := awsv2config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	stsClient := sts.NewFromConfig(cfg)
+	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return fmt.Errorf("failed to get caller identity: %w", err)
+	}
+	currentAccountID = *identity.Account
+	logger.Info("Current account detected", "accountID", currentAccountID)
+
+	// Parse cross-account roles from environment variable
+	crossAccountRolesJSON := os.Getenv("CROSS_ACCOUNT_ROLES")
+	if crossAccountRolesJSON == "" {
+		logger.Info("No CROSS_ACCOUNT_ROLES configured. Cross-account tag enrichment will be limited to monitoring account only.")
+		return nil
+	}
+
+	if err := json.Unmarshal([]byte(crossAccountRolesJSON), &crossAccountRoles); err != nil {
+		return fmt.Errorf("failed to parse CROSS_ACCOUNT_ROLES: %w", err)
+	}
+
+	logger.Info("Cross-account roles configured", "accounts", len(crossAccountRoles))
+
+	// Initialize cache for each cross-account role
+	for accountID, roleARN := range crossAccountRoles {
+		logger.Info("Initializing cache for cross-account", "accountID", accountID, "roleARN", roleARN)
+
+		cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
+			DiscoveryJobs: []model.DiscoveryJob{
+				{
+					Regions: []string{region},
+					Roles: []model.Role{
+						{
+							RoleArn: roleARN,
+						},
+					},
+				},
+			},
+		}, false)
+		if err != nil {
+			logger.Error("Failed to create cache for cross-account", "accountID", accountID, "error", err)
+			continue
+		}
+		cache.Refresh()
+		crossAccountCaches[accountID] = cache
+		logger.Info("Cross-account cache initialized", "accountID", accountID)
+	}
+
+	return nil
+}
+
+// getTaggingClientForAccount returns the appropriate tagging client for the given account
+func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clientsv2.CachingFactory) tagging.Client {
+	// If it's the current account, use default cache
+	if accountID == currentAccountID || accountID == "" {
+		if defaultCache == nil {
+			// In tests, defaultCache may be nil - return nil and skip resource fetching
+			return nil
+		}
+		logger.Info("Using default cache for current account", "accountID", accountID, "currentAccount", currentAccountID)
+		return defaultCache.GetTaggingClient(region, model.Role{}, 5)
+	}
+
+	// Check if we have a cross-account cache
+	cacheMutex.RLock()
+	cache, exists := crossAccountCaches[accountID]
+	roleARN := crossAccountRoles[accountID]
+	cacheMutex.RUnlock()
+
+	if !exists {
+		logger.Warn("No cross-account role configured for account, using default cache (tags may be missing)", "accountID", accountID)
+		return defaultCache.GetTaggingClient(region, model.Role{}, 5)
+	}
+
+	// Get role ARN for this account and create tagging client with that role
+	logger.Info("Using cross-account cache with role", "accountID", accountID, "roleARN", roleARN)
+	return cache.GetTaggingClient(region, model.Role{RoleArn: roleARN}, 5)
 }
