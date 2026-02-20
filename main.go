@@ -168,11 +168,11 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}, nil
 }
 
-func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCachePath, namespace, accountID string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
+func getOrCacheResourcesToEFS(ctx context.Context, logger *slog.Logger, client tagging.Client, fileCachePath, namespace, accountID string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
 	// If cacheEnabled is false, don't cache.
 	if !cacheEnabled {
 		logger.Info("Cache disabled, fetching resources directly", "namespace", namespace)
-		resources, err := retrieveResources(namespace, region, client)
+		resources, err := retrieveResources(ctx, namespace, region, client)
 		logger.Info("Resources fetched", "namespace", namespace, "count", len(resources), "error", err)
 		return resources, err
 	}
@@ -197,7 +197,7 @@ func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCa
 
 	if os.IsNotExist(err) || isExpired {
 		logger.Info("Cache not found or expired, retrieving resources", "namespace", namespace, "notExists", os.IsNotExist(err), "isExpired", isExpired)
-		resources, err := retrieveResources(namespace, region, client)
+		resources, err := retrieveResources(ctx, namespace, region, client)
 		logger.Info("Resources retrieved from API", "namespace", namespace, "count", len(resources), "error", err)
 		if err != nil {
 			return nil, err
@@ -235,8 +235,8 @@ func getOrCacheResourcesToEFS(logger *slog.Logger, client tagging.Client, fileCa
 	return resources, nil
 }
 
-func retrieveResources(namespace string, region *string, client tagging.Client) ([]*model.TaggedResource, error) {
-	resources, err := client.GetResources(context.Background(), model.DiscoveryJob{
+func retrieveResources(ctx context.Context, namespace string, region *string, client tagging.Client) ([]*model.TaggedResource, error) {
+	resources, err := client.GetResources(ctx, model.DiscoveryJob{
 		Namespace: namespace,
 	}, *region)
 	if err != nil && err != tagging.ErrExpectedToFindResources {
@@ -316,7 +316,7 @@ func enhanceRecordData(
 									resourceCache[cacheKey] = []*model.TaggedResource{}
 									continue
 								}
-								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, sourceAccountID, region, fileCacheExpiration, fileCacheEnabled)
+								resources, err := getOrCacheResourcesToEFS(ctx, logger, client, fileCachePath, cwm.Namespace, sourceAccountID, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error("Failed to get resources for namespace", "namespace", cwm.Namespace, "error", err)
 									if continueOnResourceFailure {

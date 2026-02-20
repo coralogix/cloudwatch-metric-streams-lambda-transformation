@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,9 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
-	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
@@ -24,8 +21,6 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
-
-var errMockServerError = errors.New("failed to get resources")
 
 func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
 	num := 1234567890
@@ -572,7 +567,7 @@ func Test_enhanceRecordData(t *testing.T) {
 		mockResourcesCache := make(map[string][]*model.TaggedResource)
 		mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 
-		if tt.resourceTagMapping != nil && len(tt.resourceTagMapping) > 0 {
+		if len(tt.resourceTagMapping) > 0 {
 			resources := []*model.TaggedResource{}
 			for _, rtm := range tt.resourceTagMapping {
 				tags := []model.Tag{}
@@ -666,7 +661,7 @@ func Test_getOrCacheResources(t *testing.T) {
 			mrg := mockResurcesGetter{
 				mockResources: []*model.TaggedResource{{Namespace: "AWS/EC2", Region: "us-east-1", Tags: []model.Tag{{Key: "Namespace", Value: "aws/ec2"}}, ARN: "arn:aws:cloudwatch:test"}},
 			}
-			got, err := getOrCacheResourcesToEFS(slog.New(slog.NewTextHandler(io.Discard, nil)), mrg, ".", tc.namespace, "123456789012", aws.String("us-east-1"), 1*time.Hour, true)
+			got, err := getOrCacheResourcesToEFS(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), mrg, ".", tc.namespace, "123456789012", aws.String("us-east-1"), 1*time.Hour, true)
 			if err != nil {
 				t.Errorf("getOrCacheResourcesToEFS() error = %v", err)
 			}
@@ -780,24 +775,6 @@ func Test_parseAndValidateCrossAccountRoles(t *testing.T) {
 	if got["111111111111"] != "arn:aws:iam::111111111111:role/Reader" {
 		t.Fatalf("unexpected valid mapping content: %#v", got)
 	}
-}
-
-type mockResourceGroupsTaggingAPIClient struct {
-	mockError  error
-	tagMapping []*resourcegroupstaggingapi.ResourceTagMapping
-	resourcegroupstaggingapiiface.ResourceGroupsTaggingAPIAPI
-}
-
-func (m mockResourceGroupsTaggingAPIClient) GetResourcesPagesWithContext(ctx aws.Context, input *resourcegroupstaggingapi.GetResourcesInput, fn func(*resourcegroupstaggingapi.GetResourcesOutput, bool) bool, opts ...request.Option) error {
-	if m.mockError != nil {
-		return m.mockError
-	}
-
-	fn(&resourcegroupstaggingapi.GetResourcesOutput{
-		PaginationToken:        nil,
-		ResourceTagMappingList: m.tagMapping,
-	}, true)
-	return nil
 }
 
 type mockResurcesGetter struct {
