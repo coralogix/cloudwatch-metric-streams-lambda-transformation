@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +36,12 @@ const cacheFile = "cache"
 
 var (
 	// Cross-account role infrastructure for tag enrichment
-	crossAccountCaches map[string]*clientsv2.CachingFactory // accountID -> cache
-	crossAccountRoles  map[string]string                    // accountID -> roleARN
-	currentAccountID   string
-	cacheMutex         sync.RWMutex
+	crossAccountCaches   map[string]*clientsv2.CachingFactory // accountID - cache
+	crossAccountRoles    map[string]string                    // accountID - roleARN
+	currentAccountID     string
+	crossAccountInitOnce sync.Once
+	crossAccountInitErr  error
+	cacheMutex           sync.RWMutex
 )
 
 func main() {
@@ -66,8 +69,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	)
 
 	// Initialize cross-account role infrastructure (once per Lambda container)
-	if crossAccountEnabled && crossAccountCaches == nil {
-		if err := initializeCrossAccountRoles(ctx, logger, *region); err != nil {
+	if crossAccountEnabled {
+		if err := ensureCrossAccountInitialized(ctx, logger, *region); err != nil {
 			logger.Error("Failed to initialize cross-account roles", "error", err)
 			// Continue without cross-account enrichment
 		}
@@ -282,7 +285,7 @@ func enhanceRecordData(
 			}
 
 			if crossAccountEnabled && sourceAccountID != "" && sourceAccountID != currentAccountID {
-				logger.Info("Using cross-account tagging client", "accountID", sourceAccountID)
+				logger.Debug("Using cross-account tagging client", "accountID", sourceAccountID)
 			}
 
 			for _, ilm := range ilms.InstrumentationLibraryMetrics {
@@ -467,6 +470,16 @@ func isCrossAccountEnabled() bool {
 // Cross-Account Tag Enrichment
 // ============================================================================
 
+var accountIDRegex = regexp.MustCompile(`^\d{12}$`)
+
+func ensureCrossAccountInitialized(ctx context.Context, logger *slog.Logger, region string) error {
+	crossAccountInitOnce.Do(func() {
+		crossAccountInitErr = initializeCrossAccountRoles(ctx, logger, region)
+	})
+
+	return crossAccountInitErr
+}
+
 // initializeCrossAccountRoles sets up caches and clients for cross-account tag enrichment
 func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, region string) error {
 	cacheMutex.Lock()
@@ -501,11 +514,17 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 		return nil
 	}
 
-	if err := json.Unmarshal([]byte(crossAccountRolesJSON), &crossAccountRoles); err != nil {
+	validatedRoles, err := parseAndValidateCrossAccountRoles(crossAccountRolesJSON, logger)
+	if err != nil {
 		return fmt.Errorf("failed to parse CROSS_ACCOUNT_ROLES: %w", err)
 	}
+	crossAccountRoles = validatedRoles
 
 	logger.Info("Cross-account roles configured", "accounts", len(crossAccountRoles))
+	if len(crossAccountRoles) == 0 {
+		logger.Warn("CROSS_ACCOUNT_ROLES contains no valid account-role mappings. Cross-account enrichment will use default cache only.")
+		return nil
+	}
 
 	// Initialize cache for each cross-account role
 	for accountID, roleARN := range crossAccountRoles {
@@ -535,6 +554,27 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 	return nil
 }
 
+func parseAndValidateCrossAccountRoles(raw string, logger *slog.Logger) (map[string]string, error) {
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil, err
+	}
+
+	validated := make(map[string]string, len(parsed))
+	for accountID, roleARN := range parsed {
+		switch {
+		case !accountIDRegex.MatchString(accountID):
+			logger.Warn("Ignoring invalid cross-account role mapping with malformed account ID", "accountID", accountID)
+		case strings.TrimSpace(roleARN) == "":
+			logger.Warn("Ignoring invalid cross-account role mapping with empty role ARN", "accountID", accountID)
+		default:
+			validated[accountID] = roleARN
+		}
+	}
+
+	return validated, nil
+}
+
 // getTaggingClientForAccount returns the appropriate tagging client for the given account
 func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clientsv2.CachingFactory, crossAccountEnabled bool) tagging.Client {
 	if defaultCache == nil {
@@ -548,7 +588,7 @@ func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, d
 
 	// If it's the current account, use default cache
 	if accountID == currentAccountID || accountID == "" {
-		logger.Info("Using default cache for current account", "accountID", accountID, "currentAccount", currentAccountID)
+		logger.Debug("Using default cache for current account", "accountID", accountID, "currentAccount", currentAccountID)
 		return defaultCache.GetTaggingClient(region, model.Role{}, 5)
 	}
 
@@ -564,6 +604,6 @@ func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, d
 	}
 
 	// Get role ARN for this account and create tagging client with that role
-	logger.Info("Using cross-account cache with role", "accountID", accountID, "roleARN", roleARN)
+	logger.Debug("Using cross-account cache with role", "accountID", accountID, "roleARN", roleARN)
 	return cache.GetTaggingClient(region, model.Role{RoleArn: roleARN}, 5)
 }
