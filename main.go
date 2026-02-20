@@ -49,6 +49,8 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	var (
 		logger = newLogger(os.Getenv("LOG_LEVEL"))
 		region = aws.String(os.Getenv("AWS_REGION"))
+		// Cross-account enrichment is opt-in and disabled by default.
+		crossAccountEnabled = isCrossAccountEnabled()
 
 		// Set defaults and if the env var is set, override the default value.
 		continueOnResourceFailure = true
@@ -64,7 +66,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	)
 
 	// Initialize cross-account role infrastructure (once per Lambda container)
-	if crossAccountCaches == nil {
+	if crossAccountEnabled && crossAccountCaches == nil {
 		if err := initializeCrossAccountRoles(ctx, logger, *region); err != nil {
 			logger.Error("Failed to initialize cross-account roles", "error", err)
 			// Continue without cross-account enrichment
@@ -142,7 +144,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	cache.Refresh()
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
+		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, crossAccountEnabled, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
 		if err != nil {
 			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
@@ -252,6 +254,7 @@ func enhanceRecordData(
 	resourceCache map[string][]*model.TaggedResource,
 	associatorCache map[string]maxdimassociator.Associator,
 	region *string,
+	crossAccountEnabled bool,
 	defaultCache *clientsv2.CachingFactory,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
@@ -278,16 +281,8 @@ func enhanceRecordData(
 				}
 			}
 
-			// Get the appropriate tagging client for this account
-			// This enables cross-account resource tag enrichment
-			client := getTaggingClientForAccount(sourceAccountID, *region, logger, defaultCache)
-			if sourceAccountID != "" && sourceAccountID != currentAccountID {
+			if crossAccountEnabled && sourceAccountID != "" && sourceAccountID != currentAccountID {
 				logger.Info("Using cross-account tagging client", "accountID", sourceAccountID)
-			}
-
-			// If client is nil (e.g., in tests), skip resource enrichment but process metrics
-			if client == nil {
-				logger.Debug("Tagging client is nil, skipping resource enrichment")
 			}
 
 			for _, ilm := range ilms.InstrumentationLibraryMetrics {
@@ -311,7 +306,13 @@ func enhanceRecordData(
 
 							// Use account-aware cache key so each account has its own resource cache
 							cacheKey := fmt.Sprintf("%s:%s", sourceAccountID, cwm.Namespace)
-							if _, ok := resourceCache[cacheKey]; !ok && client != nil {
+							if _, ok := resourceCache[cacheKey]; !ok {
+								client := getTaggingClientForAccount(sourceAccountID, *region, logger, defaultCache, crossAccountEnabled)
+								if client == nil {
+									logger.Warn("Tagging client unavailable; proceeding without fetched resources", "accountID", sourceAccountID, "namespace", cwm.Namespace, "region", *region)
+									resourceCache[cacheKey] = []*model.TaggedResource{}
+									continue
+								}
 								resources, err := getOrCacheResourcesToEFS(logger, client, fileCachePath, cwm.Namespace, sourceAccountID, region, fileCacheExpiration, fileCacheEnabled)
 								if err != nil && err != tagging.ErrExpectedToFindResources {
 									logger.Error("Failed to get resources for namespace", "namespace", cwm.Namespace, "error", err)
@@ -458,6 +459,10 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(handler)
 }
 
+func isCrossAccountEnabled() bool {
+	return strings.EqualFold(os.Getenv("CROSS_ACCOUNT_ENABLED"), "true")
+}
+
 // ============================================================================
 // Cross-Account Tag Enrichment
 // ============================================================================
@@ -531,13 +536,18 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 }
 
 // getTaggingClientForAccount returns the appropriate tagging client for the given account
-func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clientsv2.CachingFactory) tagging.Client {
+func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clientsv2.CachingFactory, crossAccountEnabled bool) tagging.Client {
+	if defaultCache == nil {
+		logger.Error("Default cache is nil, cannot create tagging client", "accountID", accountID, "region", region)
+		return nil
+	}
+
+	if !crossAccountEnabled {
+		return defaultCache.GetTaggingClient(region, model.Role{}, 5)
+	}
+
 	// If it's the current account, use default cache
 	if accountID == currentAccountID || accountID == "" {
-		if defaultCache == nil {
-			// In tests, defaultCache may be nil - return nil and skip resource fetching
-			return nil
-		}
 		logger.Info("Using default cache for current account", "accountID", accountID, "currentAccount", currentAccountID)
 		return defaultCache.GetTaggingClient(region, model.Role{}, 5)
 	}
