@@ -19,18 +19,18 @@ To install it automatically, you have a choice of 3 options:
 3. [Terraform Module](https://github.com/coralogix/terraform-coralogix-aws/tree/master/examples/firehose-metrics)
 
 ### Manual Installation
-1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alterantively, you can test, lint and build the zipped Lambda function by yourself by running `make all`.
+1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make package`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Custom runtime on Amazon Linux 2`
     - Handler: `bootstrap`
     - Architecture: `arm64` (but you can also build the function for `x86_64`)
 3. Upload the `bootstrap.zip` file as the code source.
-4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processinr, see if you need to increase it.
-5. Adjust the role of the Lambda function as described below in section [Necessary permissions](###necessary-permissions).
-6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](###configuration) section.
+4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processing, see if you need to increase it.
+5. Adjust the role of the Lambda function as described below in section [Necessary permissions](#necessary-permissions).
+6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](#configuration) section.
 7. The Lambda function is ready to be used as in [Amazon Data Firehose Data Transformation](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html?icmpid=docs_console_unmapped). Please note the function ARN and provide it in the relevant section of the Amazon Data Firehose configuration.
 
-Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Amazon Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinsis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
+Depending on the size of your setup, we also recommend to accordingly adjust your Lambda [buffer hint](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html) and Amazon Data Firehose [buffer size](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html#frequency) configuration. For most optimal experience, we recommend setting the Lambda buffer hint to `0.2 MB` and Kinesis Data Firehose buffer size to `1 MB`. **Beware that this might cause more frequent Lambda runs, which might result in higher costs**.
 
 ## Migrating from `Go 1.x` runtime to custom runtime on Amazon Linux 2
 Please beware that the `Go 1.x` runtime will be [deprecated](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/) at the end of December 2023. If you were previously using this Lambda function with the `Go 1.x`, you will need to migrate the function in accordance with the instructions in the [AWS documentation](https://aws.amazon.com/blogs/compute/migrating-aws-lambda-functions-from-the-go1-x-runtime-to-the-custom-runtime-on-amazon-linux-2/).
@@ -42,14 +42,16 @@ There is a couple of configuration options that can be set via environment varia
 |----------------------------------|---------|------------------|---------------|
 | `LOG_LEVEL`                      | `info`  | `debug`          | Sets log level.
 | `CONTINUE_ON_RESOURCE_FAILURE`   | `true`  | `false`          | Determines whether to continue on a failed API call to obtain resources. If set to true (by default), the Lambda will skip enriching the metrics with tags and return metrics without tags. If set to false, the Lambda will terminate and the metrics won't be exported to Amazon Data Firehose.
-| `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. See [Caching resources](###caching-resources) for more details.
-| `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](###caching-resources) for more details.
+| `FILE_CACHE_ENABLED`             | `true`  | `false`          | Enables caching of resources to local file. See [Caching resources](#caching-resources) for more details.
+| `FILE_CACHE_PATH`                | `/tmp`  | `<file_path>`    | Sets the path to directory where to cache resources. The directory must already exist. See [Caching resources](#caching-resources) for more details.
+| `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](#caching-resources) for more details.
 | `STATIC_LABELS`                  |         | `<json_array>`   | JSON array of key=value pairs to add as static labels to metrics. Example: `["env=production","team=platform"]`.
 | `DEFAULT_LABELS`                 | `false` | `true`           | When enabled, static labels are added to all metrics even if resource tags cannot be resolved. Acts as a fallback mechanism for consistent labeling across all metrics.
+| `CROSS_ACCOUNT_ENABLED`          | `false` | `true`           | Enables cross-account tag enrichment for metrics from linked accounts via AWS OAM. See [Cross-Account Tag Enrichment](#cross-account-tag-enrichment) for more details.
+| `CROSS_ACCOUNT_ROLES`            |         | `<json_object>`  | JSON map of linked account IDs to IAM role ARNs to assume for tag enrichment. Example: `{"123456789012":"arn:aws:iam::123456789012:role/CoralogixMetricsReader"}`. Required when `CROSS_ACCOUNT_ENABLED=true`.
 
 ### Necessary permissions
-The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
+The Lambda will use its [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:
 ```
 {
   "Version": "2012-10-17",
@@ -67,6 +69,7 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
         "dms:DescribeReplicationTasks",
         "ec2:DescribeTransitGatewayAttachments",
         "ec2:DescribeSpotFleetRequests",
+        "sts:AssumeRole",
         "shield:ListProtections",
         "storagegateway:ListGateways",
         "storagegateway:ListTagsForResource",
@@ -82,11 +85,86 @@ The Lambda will use it's [execution role](https://docs.aws.amazon.com/lambda/lat
 ### Caching resources
 Users, who do not wish to fetch resources from the AWS API on every Lambda invocation, can take advantage of caching of resources to a local file. Caching is enabled by default; to disable it, set the `FILE_CACHE_ENABLED` environment variable to `false`.
 
- This can be especially useful for users with a large number of resources, in order to keep the Lambda invocation time low and at the same to avoid hitting the [resource tagging API](https://aws.amazon.com/blogs/aws/new-aws-resource-tagging-api/) rate limits. Beware though that any changes to resource tags will not be reflect in metrics until the cache expires and is renewed.
+ This can be especially useful for users with a large number of resources, in order to keep the Lambda invocation time low and at the same to avoid hitting the [resource tagging API](https://aws.amazon.com/blogs/aws/new-aws-resource-tagging-api/) rate limits. Beware though that any changes to resource tags will not be reflected in metrics until the cache expires and is renewed.
 
-Caching can be enabled by setting the `FILE_CACHE_PATH` environment variable to a path of the directory, where the resources will be cached. You can leverage Lambda's emphemeral storage by settings this siply to `/tmp`. This ensures that the resources will be cached between Lambda invocations on a single Lambda environment, meaning the cache will be reset when new Lambda environment is created. For more details on ephemeral storage and other storage options see [here](https://aws.amazon.com/blogs/compute/choosing-between-aws-lambda-data-storage-options-in-web-apps/).
+Caching can be enabled by setting the `FILE_CACHE_PATH` environment variable to a path of the directory, where the resources will be cached. You can leverage Lambda's ephemeral storage by setting this simply to `/tmp`. This ensures that the resources will be cached between Lambda invocations on a single Lambda environment, meaning the cache will be reset when new Lambda environment is created. For more details on ephemeral storage and other storage options see [here](https://aws.amazon.com/blogs/compute/choosing-between-aws-lambda-data-storage-options-in-web-apps/).
 
 The resources will be cached for a period of time, which can be set by the `FILE_CACHE_EXPIRATION` environment variable. The expiration time can be set in the [Go duration format](https://golang.org/pkg/time/#ParseDuration). If the `FILE_CACHE_EXPIRATION` is not set, the resources will be cached for 1 hour by default.
+
+## Cross-Account Tag Enrichment
+
+When using [AWS CloudWatch Cross-Account Observability (OAM)](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Unified-Cross-Account.html), metrics from multiple linked accounts flow into a central monitoring account. The Lambda processor can enrich those cross-account metrics with resource-level tags (e.g., EC2 instance tags, EKS cluster tags, RDS tags) by assuming IAM roles in the linked accounts.
+
+This feature is **opt-in and disabled by default**. To enable it, set `CROSS_ACCOUNT_ENABLED=true` and configure `CROSS_ACCOUNT_ROLES` with a JSON map of account IDs to IAM role ARNs.
+
+> **Prerequisite:** The CloudWatch Metric Stream in the monitoring account must have `include_linked_accounts_metrics` enabled. This causes OTLP records to carry the `cloud.account.id` resource attribute, which the Lambda uses to identify the source account of each metric.
+
+### IAM Setup
+
+Two sets of IAM changes are required:
+
+#### 1. Monitoring Account — Lambda Execution Role
+
+Add `sts:AssumeRole` permission so the Lambda can assume roles in linked accounts:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "sts:AssumeRole",
+    "Resource": "arn:aws:iam::*:role/CoralogixMetricsReader"
+  }]
+}
+```
+
+#### 2. Each Linked Account — Create a Cross-Account Role
+
+Create an IAM role (e.g., `CoralogixMetricsReader`) with the following **trust policy**, replacing `MONITORING_ACCOUNT_ID` and the Lambda role name as appropriate:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "AWS": "arn:aws:iam::MONITORING_ACCOUNT_ID:role/YOUR_LAMBDA_EXECUTION_ROLE_NAME"
+    },
+    "Action": "sts:AssumeRole"
+  }]
+}
+```
+
+And the following **permissions policy** to allow read-only access to resource tags and descriptions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "tag:GetResources",
+      "ec2:Describe*",
+      "rds:Describe*",
+      "lambda:List*",
+      "lambda:GetFunction",
+      "eks:DescribeCluster",
+      "eks:ListClusters",
+      "elasticloadbalancing:Describe*",
+      "autoscaling:Describe*"
+    ],
+    "Resource": "*"
+  }]
+}
+```
+
+### How It Works
+
+1. The Lambda extracts `cloud.account.id` from each OTLP metric record
+2. If the source account differs from the monitoring account, it assumes the corresponding role from `CROSS_ACCOUNT_ROLES` via STS
+3. Using the temporary credentials, it calls `tag:GetResources` in the linked account to fetch resource tags
+4. Tags are associated with the metrics and added as labels before delivery to Coralogix
+5. Results are cached per account per namespace to avoid redundant API calls and prevent data contamination between accounts
 
 ## Extra costs and usage of AWS APIs
 There are couple of costs connected with usage of Lambda transformation. Below, these costs are described in details (based on examples and pricing in the US East region). This example assumes a user will be exporting metrics from all namespaces and that the metrics updates are coming once per minute (which is not true for all AWS metrics, see [this thread](https://serverfault.com/questions/1003344/aws-cloudwatch-metrics-are-there-convergence-delays?newreg=80710344c54e4a8397eac3acfdb01941) to learn more). The example is based on a region with ~5000 metrics. For detailed pricing information see [here](https://aws.amazon.com/lambda/pricing/). This calculation is for informative purposes and it is valid as of March 2023 to the best of our knowledge.
