@@ -161,10 +161,12 @@ And the following **permissions policy** to allow read-only access to resource t
 ### How It Works
 
 1. The Lambda extracts `cloud.account.id` from each OTLP metric record
-2. If the source account differs from the monitoring account, it assumes the corresponding role from `CROSS_ACCOUNT_ROLES` via STS
+2. If the source account differs from the monitoring account, the Lambda looks up that account ID in `CROSS_ACCOUNT_ROLES` and calls AWS STS `AssumeRole` on the mapped role ARN
 3. Using the temporary credentials, it calls `tag:GetResources` in the linked account to fetch resource tags
 4. Tags are associated with the metrics and added as labels before delivery to Coralogix
 5. Results are cached per account per namespace to avoid redundant API calls and prevent data contamination between accounts
+
+If no mapping exists for a source account ID, the Lambda falls back to default credentials and cross-account tags for that account may be missing.
 
 ## Extra costs and usage of AWS APIs
 There are couple of costs connected with usage of Lambda transformation. Below, these costs are described in details (based on examples and pricing in the US East region). This example assumes a user will be exporting metrics from all namespaces and that the metrics updates are coming once per minute (which is not true for all AWS metrics, see [this thread](https://serverfault.com/questions/1003344/aws-cloudwatch-metrics-are-there-convergence-delays?newreg=80710344c54e4a8397eac3acfdb01941) to learn more). The example is based on a region with ~5000 metrics. For detailed pricing information see [here](https://aws.amazon.com/lambda/pricing/). This calculation is for informative purposes and it is valid as of March 2023 to the best of our knowledge.
