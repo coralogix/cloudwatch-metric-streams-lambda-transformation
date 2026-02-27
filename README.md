@@ -21,7 +21,7 @@ To install it automatically, you have a choice of 3 options:
 ### Manual Installation
 1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make package`.
 2. Create a new AWS Lambda function in your designated region with the following parameters:
-    - Runtime: `Custom runtime on Amazon Linux 2`
+    - Runtime: `Custom runtime on Amazon Linux 2023 (provided.al2023)`
     - Handler: `bootstrap`
     - Architecture: `arm64` (but you can also build the function for `x86_64`)
 3. Upload the `bootstrap.zip` file as the code source.
