@@ -40,3 +40,15 @@ zip:
 .PHONY: s3-publish-function
 s3-publish:
 	aws s3 cp ${ZIP_FILE_NAME} s3://${AWS_SERVERLESS_BUCKET}-${AWS_DEFAULT_REGION}/${ZIP_FILE_NAME}
+
+.PHONY: gen-fixture
+gen-fixture:
+	go run ./test-env/scripts/gen-fixture/
+
+.PHONY: test-env-init
+test-env-init:
+	cd test-env && terraform init
+
+.PHONY: test-env-apply
+test-env-apply: package
+	cd test-env && terraform apply
