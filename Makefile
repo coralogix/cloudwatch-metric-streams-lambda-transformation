@@ -52,3 +52,13 @@ test-env-init:
 .PHONY: test-env-apply
 test-env-apply: package
 	cd test-env && terraform apply
+
+.PHONY: test-env-redeploy
+test-env-redeploy: package
+	cd test-env && terraform apply -auto-approve \
+		-target=null_resource.lambda_package \
+		-target=module.cloudwatch_firehose_metrics_coralogix.aws_lambda_function.lambda_processor
+
+.PHONY: vulncheck
+vulncheck:
+	govulncheck ./...

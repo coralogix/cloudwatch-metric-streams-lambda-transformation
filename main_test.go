@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	taggingv1 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
@@ -22,7 +21,26 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
-func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*resourcegroupstaggingapi.ResourceTagMapping, wanted []*metricspb.Metric) {
+func ebsTaggedResource(arn, name, team, env string) *model.TaggedResource {
+	tags := make([]model.Tag, 0, 3)
+	if name != "" {
+		tags = append(tags, model.Tag{Key: "Name", Value: name})
+	}
+	if team != "" {
+		tags = append(tags, model.Tag{Key: "team", Value: team})
+	}
+	if env != "" {
+		tags = append(tags, model.Tag{Key: "env", Value: env})
+	}
+	return &model.TaggedResource{
+		ARN:       arn,
+		Namespace: "AWS/EBS",
+		Region:    "us-east-1",
+		Tags:      tags,
+	}
+}
+
+func generateMetrics(n int) (metrics []*metricspb.Metric, mockResources []*model.TaggedResource, wanted []*metricspb.Metric) {
 	num := 1234567890
 	for i := 0; i < n; i++ {
 		metrics = append(metrics, &metricspb.Metric{
@@ -54,23 +72,10 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 	}
 
 	for i := 0; i < n; i++ {
-		resourceTagMapping = append(resourceTagMapping, &resourcegroupstaggingapi.ResourceTagMapping{
-			ResourceARN: aws.String(fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:volume/vol-%d", num+i)),
-			Tags: []*resourcegroupstaggingapi.Tag{
-				{
-					Key:   aws.String("Name"),
-					Value: aws.String("test-instance"),
-				},
-				{
-					Key:   aws.String("team"),
-					Value: aws.String("test-team-1"),
-				},
-				{
-					Key:   aws.String("env"),
-					Value: aws.String("testing"),
-				},
-			},
-		})
+		mockResources = append(mockResources, ebsTaggedResource(
+			fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:volume/vol-%d", num+i),
+			"test-instance", "test-team-1", "testing",
+		))
 	}
 
 	for i := 0; i < n; i++ {
@@ -118,27 +123,14 @@ func generateMetrics(n int) (metrics []*metricspb.Metric, resourceTagMapping []*
 }
 
 func Test_enhanceRecordData_NMetrics(t *testing.T) {
-	testMetrics, resourceTagMapping, wantMetrics := generateMetrics(8000)
+	testMetrics, mockResources, wantMetrics := generateMetrics(8000)
 
 	l := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockResourcesCache := make(map[string][]*model.TaggedResource)
 	mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 	_ = taggingv1.NewClient // Keep import from being removed
 
-	resources := []*model.TaggedResource{}
-	for _, rtm := range resourceTagMapping {
-		tags := []model.Tag{}
-		for _, t := range rtm.Tags {
-			tags = append(tags, model.Tag{Key: *t.Key, Value: *t.Value})
-		}
-		resources = append(resources, &model.TaggedResource{
-			ARN:       *rtm.ResourceARN,
-			Namespace: "AWS/EBS",
-			Region:    "us-east-1",
-			Tags:      tags,
-		})
-	}
-	mockResourcesCache[":AWS/EBS"] = resources
+	mockResourcesCache[":AWS/EBS"] = mockResources
 
 	data, err := createTestDataFromMetrics(testMetrics)
 	if err != nil {
@@ -165,7 +157,7 @@ func Test_enhanceRecordData(t *testing.T) {
 	testCases := []struct {
 		name                      string
 		testMetrics               []*metricspb.Metric
-		resourceTagMapping        []*resourcegroupstaggingapi.ResourceTagMapping
+		mockResources             []*model.TaggedResource
 		continueOnResourceFailure bool
 		wantMetrics               []*metricspb.Metric
 		wantErr                   error
@@ -202,24 +194,8 @@ func Test_enhanceRecordData(t *testing.T) {
 					},
 				},
 			},
-			resourceTagMapping: []*resourcegroupstaggingapi.ResourceTagMapping{
-				{
-					ResourceARN: aws.String("arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789"),
-					Tags: []*resourcegroupstaggingapi.Tag{
-						{
-							Key:   aws.String("Name"),
-							Value: aws.String("test-instance"),
-						},
-						{
-							Key:   aws.String("team"),
-							Value: aws.String("test-team-1"),
-						},
-						{
-							Key:   aws.String("env"),
-							Value: aws.String("testing"),
-						},
-					},
-				},
+			mockResources: []*model.TaggedResource{
+				ebsTaggedResource("arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789", "test-instance", "test-team-1", "testing"),
 			},
 			wantMetrics: []*metricspb.Metric{
 				{
@@ -293,24 +269,8 @@ func Test_enhanceRecordData(t *testing.T) {
 					},
 				},
 			},
-			resourceTagMapping: []*resourcegroupstaggingapi.ResourceTagMapping{
-				{
-					ResourceARN: aws.String("arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789"),
-					Tags: []*resourcegroupstaggingapi.Tag{
-						{
-							Key:   aws.String("Name"),
-							Value: aws.String("test-instance"),
-						},
-						{
-							Key:   aws.String("team"),
-							Value: aws.String("test-team-1"),
-						},
-						{
-							Key:   aws.String("env"),
-							Value: aws.String("testing"),
-						},
-					},
-				},
+			mockResources: []*model.TaggedResource{
+				ebsTaggedResource("arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789", "test-instance", "test-team-1", "testing"),
 			},
 			wantMetrics: []*metricspb.Metric{
 				{
@@ -512,16 +472,8 @@ func Test_enhanceRecordData(t *testing.T) {
 					},
 				},
 			},
-			resourceTagMapping: []*resourcegroupstaggingapi.ResourceTagMapping{
-				{
-					ResourceARN: aws.String("arn:aws:ec2:us-east-1:123456789012:volume/vol-different"),
-					Tags: []*resourcegroupstaggingapi.Tag{
-						{
-							Key:   aws.String("Name"),
-							Value: aws.String("test-instance"),
-						},
-					},
-				},
+			mockResources: []*model.TaggedResource{
+				ebsTaggedResource("arn:aws:ec2:us-east-1:123456789012:volume/vol-different", "test-instance", "", ""),
 			},
 			wantMetrics: []*metricspb.Metric{
 				{
@@ -567,21 +519,8 @@ func Test_enhanceRecordData(t *testing.T) {
 		mockResourcesCache := make(map[string][]*model.TaggedResource)
 		mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
 
-		if len(tt.resourceTagMapping) > 0 {
-			resources := []*model.TaggedResource{}
-			for _, rtm := range tt.resourceTagMapping {
-				tags := []model.Tag{}
-				for _, t := range rtm.Tags {
-					tags = append(tags, model.Tag{Key: *t.Key, Value: *t.Value})
-				}
-				resources = append(resources, &model.TaggedResource{
-					ARN:       *rtm.ResourceARN,
-					Namespace: "AWS/EBS",
-					Region:    "us-east-1",
-					Tags:      tags,
-				})
-			}
-			mockResourcesCache[":AWS/EBS"] = resources
+		if len(tt.mockResources) > 0 {
+			mockResourcesCache[":AWS/EBS"] = tt.mockResources
 		}
 
 		t.Run(tt.name, func(t *testing.T) {
