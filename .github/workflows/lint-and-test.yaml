@@ -22,8 +22,8 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
-          # v2.5.0+ required for Go 1.26 (official binaries built with go1.26).
-          version: v2.5
+          # v2.9.0+ required: official binaries must be built with Go >= 1.26 (see golangci-lint changelog).
+          version: v2.9
           args: --timeout=5m
 
   test:
