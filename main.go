@@ -331,7 +331,7 @@ func enhanceRecordData(
 										sampleARNs += res.ARN + " "
 									}
 								}
-								logger.Info("Caching GetResources result for namespace locally", "namespace", cwm.Namespace, "resourceCount", len(resources), "accountID", sourceAccountID, "cacheKey", cacheKey, "sampleARNs", sampleARNs)
+								logger.Debug("Caching GetResources result for namespace locally", "namespace", cwm.Namespace, "resourceCount", len(resources), "accountID", sourceAccountID, "cacheKey", cacheKey, "sampleARNs", sampleARNs)
 								resourceCache[cacheKey] = resources
 							}
 
@@ -350,9 +350,9 @@ func enhanceRecordData(
 									for k, v := range cwm.Dimensions {
 										dimensionsStr += fmt.Sprintf("%v=%v ", k, v)
 									}
-									logger.Info("No matching resource found for metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID, "dimensions", dimensionsStr)
+									logger.Debug("No matching resource found for metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID, "dimensions", dimensionsStr)
 								} else {
-									logger.Info("Could not associate resource to metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID)
+									logger.Debug("Could not associate resource to metric", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID)
 								}
 								// If defaultLabels is enabled, add static labels even when resource tags are absent
 								if defaultLabels {
@@ -366,7 +366,7 @@ func enhanceRecordData(
 								continue
 							}
 
-							logger.Info("Enriching metric with resource tags", "namespace", cwm.Namespace, "metric", cwm.MetricName, "tagCount", len(r.Tags), "accountID", sourceAccountID)
+							logger.Debug("Enriching metric with resource tags", "namespace", cwm.Namespace, "metric", cwm.MetricName, "tagCount", len(r.Tags), "accountID", sourceAccountID)
 							for _, tag := range r.Tags {
 								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
 									Key:   tag.Key,
