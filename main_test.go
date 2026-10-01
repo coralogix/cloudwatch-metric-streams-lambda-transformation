@@ -12,7 +12,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
-	taggingv1 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging/v1"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/model"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -128,7 +127,6 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 	l := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockResourcesCache := make(map[string][]*model.TaggedResource)
 	mockAssociatorsCache := make(map[string]maxdimassociator.Associator)
-	_ = taggingv1.NewClient // Keep import from being removed
 
 	mockResourcesCache[":AWS/EBS"] = mockResources
 

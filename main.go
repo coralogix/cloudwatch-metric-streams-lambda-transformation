@@ -20,11 +20,12 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
-	clientsv2 "github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/v2"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/config"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/model"
+	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/promutil"
 	metricsservicepb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -36,8 +37,8 @@ const cacheFile = "cache"
 
 var (
 	// Cross-account role infrastructure for tag enrichment
-	crossAccountCaches   map[string]*clientsv2.CachingFactory // accountID - cache
-	crossAccountRoles    map[string]string                    // accountID - roleARN
+	crossAccountCaches   map[string]*clients.CachingFactory // accountID - cache
+	crossAccountRoles    map[string]string                  // accountID - roleARN
 	currentAccountID     string
 	crossAccountInitOnce sync.Once
 	crossAccountInitErr  error
@@ -129,7 +130,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		defaultLabels = true
 	}
 
-	cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
+	cache, err := clients.NewFactory(logger, promutil.Discard, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
 				Regions: []string{*region},
@@ -258,7 +259,7 @@ func enhanceRecordData(
 	associatorCache map[string]maxdimassociator.Associator,
 	region *string,
 	crossAccountEnabled bool,
-	defaultCache *clientsv2.CachingFactory,
+	defaultCache *clients.CachingFactory,
 	fileCacheExpiration time.Duration,
 	fileCacheEnabled bool,
 	staticLabels map[string]string,
@@ -490,7 +491,7 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 		return nil
 	}
 
-	crossAccountCaches = make(map[string]*clientsv2.CachingFactory)
+	crossAccountCaches = make(map[string]*clients.CachingFactory)
 	crossAccountRoles = make(map[string]string)
 
 	// Get current account ID using STS
@@ -530,7 +531,7 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 	for accountID, roleARN := range crossAccountRoles {
 		logger.Info("Initializing cache for cross-account", "accountID", accountID, "roleARN", roleARN)
 
-		cache, err := clientsv2.NewFactory(logger, model.JobsConfig{
+		cache, err := clients.NewFactory(logger, promutil.Discard, model.JobsConfig{
 			DiscoveryJobs: []model.DiscoveryJob{
 				{
 					Regions: []string{region},
@@ -576,7 +577,7 @@ func parseAndValidateCrossAccountRoles(raw string, logger *slog.Logger) (map[str
 }
 
 // getTaggingClientForAccount returns the appropriate tagging client for the given account
-func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clientsv2.CachingFactory, crossAccountEnabled bool) tagging.Client {
+func getTaggingClientForAccount(accountID, region string, logger *slog.Logger, defaultCache *clients.CachingFactory, crossAccountEnabled bool) tagging.Client {
 	if defaultCache == nil {
 		logger.Error("Default cache is nil, cannot create tagging client", "accountID", accountID, "region", region)
 		return nil
