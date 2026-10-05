@@ -63,6 +63,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		fileCachePath             = "/tmp"
 		staticLabels              = make(map[string]string)
 		defaultLabels             = false
+		derivedLabels             []derivedLabelRule
 
 		resourcesPerNamespace   = make(map[string][]*model.TaggedResource)
 		associatorsPerNamespace = make(map[string]maxdimassociator.Associator)
@@ -130,6 +131,15 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		defaultLabels = true
 	}
 
+	if raw := os.Getenv("DERIVED_LABELS"); raw != "" {
+		rules, err := parseDerivedLabels(raw)
+		if err != nil {
+			logger.Error("Failed to parse DERIVED_LABELS, derived labels are disabled", "error", err)
+		} else {
+			derivedLabels = rules
+		}
+	}
+
 	cache, err := clients.NewFactory(logger, promutil.Discard, model.JobsConfig{
 		DiscoveryJobs: []model.DiscoveryJob{
 			{
@@ -148,7 +158,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	cache.Refresh()
 
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, crossAccountEnabled, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels)
+		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, crossAccountEnabled, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels, derivedLabels)
 		if err != nil {
 			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
@@ -264,6 +274,7 @@ func enhanceRecordData(
 	fileCacheEnabled bool,
 	staticLabels map[string]string,
 	defaultLabels bool,
+	derivedLabels []derivedLabelRule,
 ) ([]byte, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
@@ -374,7 +385,17 @@ func enhanceRecordData(
 									Value: tag.Value,
 								})
 							}
+							derived, unmatched := applyDerivedLabels(derivedLabels, r.Tags, dp.Labels)
+							dp.Labels = append(dp.Labels, derived...)
+							for _, target := range unmatched {
+								logger.Debug("No source tag qualified for derived label", "namespace", cwm.Namespace, "metric", cwm.MetricName, "accountID", sourceAccountID, "resource", r.ARN, "label", target)
+							}
 							for k, v := range staticLabels {
+								// A derived label takes precedence over a static label with the same key,
+								// so a static label can act as the fallback value.
+								if hasLabel(derived, k) {
+									continue
+								}
 								dp.Labels = append(dp.Labels, &commonpb.StringKeyValue{
 									Key:   k,
 									Value: v,
@@ -553,6 +574,114 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 	}
 
 	return nil
+}
+
+// derivedLabelRule adds a label named Target whose value is copied from the first
+// tag in Sources that is present on the resource, non-empty and not in ExcludeValues.
+// Configured via the DERIVED_LABELS env var, e.g.
+// [{"target":"cost_center","sources":["CostCenter","Department"],"exclude_values":["none","n/a"]}]
+type derivedLabelRule struct {
+	Target        string   `json:"target"`
+	Sources       []string `json:"sources"`
+	ExcludeValues []string `json:"exclude_values"`
+}
+
+// parseDerivedLabels parses and validates the DERIVED_LABELS env var. Any invalid
+// rule rejects the whole configuration, so a typo never results in partial labelling.
+func parseDerivedLabels(raw string) ([]derivedLabelRule, error) {
+	var rules []derivedLabelRule
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&rules); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("invalid JSON: unexpected data after the rules array")
+	}
+	if rules == nil {
+		return nil, fmt.Errorf("invalid JSON: rules must be a JSON array")
+	}
+
+	targets := make(map[string]bool, len(rules))
+	for i, r := range rules {
+		if strings.TrimSpace(r.Target) == "" {
+			return nil, fmt.Errorf("rule %d: target must not be empty", i)
+		}
+		if targets[r.Target] {
+			return nil, fmt.Errorf("rule %d: duplicate target %q", i, r.Target)
+		}
+		targets[r.Target] = true
+		if len(r.Sources) == 0 {
+			return nil, fmt.Errorf("rule %d (%s): sources must not be empty", i, r.Target)
+		}
+		for _, s := range r.Sources {
+			if strings.TrimSpace(s) == "" {
+				return nil, fmt.Errorf("rule %d (%s): sources must not contain empty strings", i, r.Target)
+			}
+			if s == r.Target {
+				return nil, fmt.Errorf("rule %d (%s): target must not be one of its own sources", i, r.Target)
+			}
+		}
+	}
+
+	return rules, nil
+}
+
+// applyDerivedLabels returns the labels produced by rules for a resource with the given tags,
+// and the targets of rules for which no source tag qualified. A rule is skipped (and not
+// reported as unmatched) when the resource already has a tag, or the data point already has a
+// label (e.g. a dimension such as VolumeId), named like its target, so existing values always
+// win and a key is never emitted twice.
+func applyDerivedLabels(rules []derivedLabelRule, tags []model.Tag, existing []*commonpb.StringKeyValue) (labels []*commonpb.StringKeyValue, unmatched []string) {
+	for _, r := range rules {
+		if _, ok := tagValue(tags, r.Target); ok || hasLabel(existing, r.Target) {
+			continue
+		}
+		matched := false
+		for _, s := range r.Sources {
+			v, ok := tagValue(tags, s)
+			if !ok || strings.TrimSpace(v) == "" || isExcluded(v, r.ExcludeValues) {
+				continue
+			}
+			labels = append(labels, &commonpb.StringKeyValue{Key: r.Target, Value: v})
+			matched = true
+			break
+		}
+		if !matched {
+			unmatched = append(unmatched, r.Target)
+		}
+	}
+
+	return labels, unmatched
+}
+
+func tagValue(tags []model.Tag, key string) (string, bool) {
+	for _, t := range tags {
+		if t.Key == key {
+			return t.Value, true
+		}
+	}
+	return "", false
+}
+
+// isExcluded matches case-insensitively, so "None" and "none" are treated the same.
+func isExcluded(value string, excludeValues []string) bool {
+	value = strings.TrimSpace(value)
+	for _, e := range excludeValues {
+		if strings.EqualFold(value, strings.TrimSpace(e)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLabel(labels []*commonpb.StringKeyValue, key string) bool {
+	for _, l := range labels {
+		if l.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func parseAndValidateCrossAccountRoles(raw string, logger *slog.Logger) (map[string]string, error) {
