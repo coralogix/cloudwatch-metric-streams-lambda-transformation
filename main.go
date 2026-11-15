@@ -295,6 +295,13 @@ func enhanceRecordData(
 		return nil, 0, err
 	}
 	dropped := 0
+	dropEnabled := false
+	for _, r := range derivedLabels {
+		if len(r.DropValues) > 0 {
+			dropEnabled = true
+			break
+		}
+	}
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
@@ -419,15 +426,17 @@ func enhanceRecordData(
 						}
 						// Runs after enrichment, on every data point (also those with no matching
 						// resource), so the final label value decides.
-						kept := t.DoubleSummary.DataPoints[:0]
-						for _, dp := range t.DoubleSummary.DataPoints {
-							if shouldDrop(derivedLabels, dp.Labels) {
-								dropped++
-								continue
+						if dropEnabled {
+							kept := t.DoubleSummary.DataPoints[:0]
+							for _, dp := range t.DoubleSummary.DataPoints {
+								if shouldDrop(derivedLabels, dp.Labels) {
+									dropped++
+									continue
+								}
+								kept = append(kept, dp)
 							}
-							kept = append(kept, dp)
+							t.DoubleSummary.DataPoints = kept
 						}
-						t.DoubleSummary.DataPoints = kept
 					default:
 						logger.Debug("Unsupported metric type", "type", fmt.Sprintf("%T", t))
 					}

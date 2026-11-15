@@ -1432,3 +1432,87 @@ func Test_processRecord_Error(t *testing.T) {
 		t.Fatal("processRecord() error = nil, want error")
 	}
 }
+
+// Exercises compaction and pruning: blocked and allowed points within one metric, several
+// size-delimited requests, and an unsupported metric type that is never filtered.
+func Test_enhanceRecordData_DropValuesStructure(t *testing.T) {
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked-1", tags("Solution", "tenant-x")),
+		ebsVolume("vol-blocked-2", tags("Solution", "tenant-y")),
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),
+	}}
+	summary := func(volumes ...string) *metricspb.Metric {
+		m := ebsVolumeMetric(volumes[0])
+		for _, v := range volumes[1:] {
+			m.GetDoubleSummary().DataPoints = append(m.GetDoubleSummary().DataPoints, ebsVolumeMetric(v).GetDoubleSummary().DataPoints...)
+		}
+		return m
+	}
+	gauge := &metricspb.Metric{
+		Name: "unsupported",
+		Data: &metricspb.Metric_DoubleGauge{DoubleGauge: &metricspb.DoubleGauge{
+			DataPoints: []*metricspb.DoubleDataPoint{{Labels: labels("tenant", "tenant-x")}},
+		}},
+	}
+	request := func(mm ...*metricspb.Metric) *metricsservicepb.ExportMetricsServiceRequest {
+		return &metricsservicepb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+			InstrumentationLibraryMetrics: []*metricspb.InstrumentationLibraryMetrics{{Metrics: mm}},
+		}}}
+	}
+	data, err := requestsIntoRawData([]*metricsservicepb.ExportMetricsServiceRequest{
+		request(summary("vol-blocked-1", "vol-allowed", "vol-blocked-2"), gauge), // mixed + unsupported
+		request(summary("vol-blocked-1", "vol-blocked-2")),                       // fully dropped
+		request(summary("vol-allowed")),                                          // untouched
+	})
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	out, dropped, err := enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{tenantRule})
+	if err != nil {
+		t.Fatalf("enhanceRecordData() error = %v", err)
+	}
+	if dropped != 4 {
+		t.Errorf("dropped = %d, want 4", dropped)
+	}
+
+	reqs, err := rawDataIntoRequests(out)
+	if err != nil {
+		t.Fatalf("failed to decode output: %v", err)
+	}
+	// Per request: metric name -> data point count. The fully dropped request is gone.
+	var got []map[string]int
+	var volumes []string
+	for _, req := range reqs {
+		counts := map[string]int{}
+		for _, rm := range req.ResourceMetrics {
+			for _, ilm := range rm.InstrumentationLibraryMetrics {
+				for _, m := range ilm.Metrics {
+					switch d := m.Data.(type) {
+					case *metricspb.Metric_DoubleSummary:
+						counts[m.Name] += len(d.DoubleSummary.DataPoints)
+						for _, dp := range d.DoubleSummary.DataPoints {
+							for _, l := range dp.Labels {
+								if l.Key == "VolumeId" {
+									volumes = append(volumes, l.Value)
+								}
+							}
+						}
+					case *metricspb.Metric_DoubleGauge:
+						counts[m.Name] += len(d.DoubleGauge.DataPoints)
+					}
+				}
+			}
+		}
+		got = append(got, counts)
+	}
+	ebs := "amazonaws.com/AWS/EBS/VolumeWriteBytes"
+	want := []map[string]int{{ebs: 1, "unsupported": 1}, {ebs: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("data points per request = %v, want %v", got, want)
+	}
+	if want := []string{"vol-allowed", "vol-allowed"}; !reflect.DeepEqual(volumes, want) {
+		t.Errorf("kept volumes = %v, want %v", volumes, want)
+	}
+}
