@@ -166,6 +166,7 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
 		}
+		logger.Debug("Processed record", "recordId", responseRecord.RecordID, "result", responseRecord.Result, "dropped", dropped)
 		droppedTotal += dropped
 		responseRecords = append(responseRecords, responseRecord)
 	}
@@ -188,6 +189,10 @@ func processRecord(record events.KinesisFirehoseEventRecord, enhance func([]byte
 	result := events.KinesisFirehoseTransformedStateOk
 	if dropped > 0 && len(data) == 0 {
 		result = events.KinesisFirehoseTransformedStateDropped
+	}
+	if data == nil {
+		// Firehose requires data to be a base64 string; nil would marshal to JSON null.
+		data = []byte{}
 	}
 	return events.KinesisFirehoseResponseRecord{RecordID: record.RecordID, Result: result, Data: data}, dropped, nil
 }

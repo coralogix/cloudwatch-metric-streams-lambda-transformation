@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1423,6 +1425,82 @@ func Test_processRecord(t *testing.T) {
 				t.Errorf("kept volumes = %v, want %v", volumes, tt.wantVolumes)
 			}
 		})
+	}
+}
+
+// The Firehose response is JSON; every record's data must be a base64 string, including Dropped.
+func Test_processRecord_ResponseJSON(t *testing.T) {
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked", tags("Solution", "tenant-x")),
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),
+	}}
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	enhance := func(data []byte) ([]byte, int, error) {
+		return enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{tenantRule})
+	}
+	var resp events.KinesisFirehoseResponse
+	for id, volume := range map[string]string{"r-blocked": "vol-blocked", "r-allowed": "vol-allowed"} {
+		data, err := createTestDataFromMetrics([]*metricspb.Metric{ebsVolumeMetric(volume)})
+		if err != nil {
+			t.Fatalf("failed to create test data: %v", err)
+		}
+		rec, _, err := processRecord(events.KinesisFirehoseEventRecord{RecordID: id, Data: data}, enhance)
+		if err != nil {
+			t.Fatalf("processRecord() error = %v", err)
+		}
+		resp.Records = append(resp.Records, rec)
+	}
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var parsed struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	got := map[string]map[string]any{}
+	for _, r := range parsed.Records {
+		got[r["recordId"].(string)] = r
+	}
+	if len(got) != 2 {
+		t.Fatalf("records = %s, want r-blocked and r-allowed", raw)
+	}
+
+	for id, want := range map[string]struct {
+		result  string
+		volumes []string
+	}{
+		"r-blocked": {result: "Dropped"},
+		"r-allowed": {result: "Ok", volumes: []string{"vol-allowed"}},
+	} {
+		r, ok := got[id]
+		if !ok {
+			t.Fatalf("record %s missing from %s", id, raw)
+		}
+		if r["result"] != want.result {
+			t.Errorf("%s result = %v, want %s", id, r["result"], want.result)
+		}
+		s, ok := r["data"].(string)
+		if !ok {
+			t.Fatalf("%s data = %#v, want a JSON string", id, r["data"])
+		}
+		decoded, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("%s data is not base64: %v", id, err)
+		}
+		if want.volumes == nil && s != "" {
+			t.Errorf("%s data = %q, want \"\"", id, s)
+		}
+		var volumes []string
+		for v := range labelsByVolume(t, decoded) {
+			volumes = append(volumes, v)
+		}
+		if !reflect.DeepEqual(volumes, want.volumes) {
+			t.Errorf("%s volumes = %v, want %v", id, volumes, want.volumes)
+		}
 	}
 }
 
