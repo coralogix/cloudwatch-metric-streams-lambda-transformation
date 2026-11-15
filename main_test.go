@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/clients/tagging"
 	"github.com/prometheus-community/yet-another-cloudwatch-exporter/pkg/job/maxdimassociator"
@@ -138,7 +141,7 @@ func Test_enhanceRecordData_NMetrics(t *testing.T) {
 		t.Fatalf("failed to create test data: %v", err)
 	}
 
-	got, err := enhanceRecordData(context.Background(), l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, 1*time.Hour, false, make(map[string]string), false, nil)
+	got, _, err := enhanceRecordData(context.Background(), l, "", false, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, 1*time.Hour, false, make(map[string]string), false, nil)
 	if err != nil {
 		t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, false)
 		return
@@ -530,7 +533,7 @@ func Test_enhanceRecordData(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(context.Background(), l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, 1*time.Hour, false, tt.staticLabels, tt.defaultLabels, nil)
+			got, _, err := enhanceRecordData(context.Background(), l, "", tt.continueOnResourceFailure, data, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, 1*time.Hour, false, tt.staticLabels, tt.defaultLabels, nil)
 			if err != tt.wantErr && tt.wantErr != tagging.ErrExpectedToFindResources {
 				t.Errorf("enhanceRecordData() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -677,7 +680,7 @@ func Test_enhanceRecordData_MultiAccountCacheIsolation(t *testing.T) {
 		t.Fatalf("failed to create test data: %v", err)
 	}
 
-	got, err := enhanceRecordData(context.Background(), logger, "", false, reqData, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, nil)
+	got, _, err := enhanceRecordData(context.Background(), logger, "", false, reqData, mockResourcesCache, mockAssociatorsCache, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, nil)
 	if err != nil {
 		t.Fatalf("enhanceRecordData() error = %v", err)
 	}
@@ -832,6 +835,12 @@ func Test_parseDerivedLabels(t *testing.T) {
 				{Target: "owner", Sources: []string{"Team", "Owner"}},
 			},
 		},
+		{
+			name: "drop_values",
+			raw:  `[{"target":"tenant","sources":["Solution"],"drop_values":["tenant-x","tenant-y"]}]`,
+			want: []derivedLabelRule{{Target: "tenant", Sources: []string{"Solution"}, DropValues: []string{"tenant-x", "tenant-y"}}},
+		},
+		{name: "empty drop value", raw: `[{"target":"tenant","sources":["Solution"],"drop_values":["tenant-x"," "]}]`, wantErr: "drop_values must not contain empty strings"},
 		{name: "invalid JSON", raw: `[{"target":`, wantErr: "invalid JSON"},
 		{name: "trailing data", raw: `[{"target":"cost_center","sources":["CostCenter"]}] garbage`, wantErr: "unexpected data after the rules array"},
 		{name: "two arrays", raw: `[] []`, wantErr: "unexpected data after the rules array"},
@@ -1125,7 +1134,7 @@ func Test_enhanceRecordData_DerivedLabels(t *testing.T) {
 				t.Fatalf("failed to create test data: %v", err)
 			}
 
-			got, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, associatorCache, aws.String("us-east-1"), false, nil, time.Hour, false, tt.staticLabels, tt.defaultLabels, tt.derivedLabels)
+			got, _, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, associatorCache, aws.String("us-east-1"), false, nil, time.Hour, false, tt.staticLabels, tt.defaultLabels, tt.derivedLabels)
 			if err != nil {
 				t.Fatalf("enhanceRecordData() error = %v", err)
 			}
@@ -1150,7 +1159,7 @@ func Test_enhanceRecordData_DerivedLabels_LogsUnmatched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test data: %v", err)
 	}
-	if _, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{costCenterRule}); err != nil {
+	if _, _, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{costCenterRule}); err != nil {
 		t.Fatalf("enhanceRecordData() error = %v", err)
 	}
 
@@ -1193,7 +1202,7 @@ func Test_enhanceRecordData_DimensionCollision(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create test data: %v", err)
 			}
-			got, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, tt.staticLabels, tt.defaultLabels, tt.derivedLabels)
+			got, _, err := enhanceRecordData(context.Background(), l, "", false, data, resourceCache, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, tt.staticLabels, tt.defaultLabels, tt.derivedLabels)
 			if err != nil {
 				t.Fatalf("enhanceRecordData() error = %v", err)
 			}
@@ -1214,5 +1223,374 @@ func Test_enhanceRecordData_DimensionCollision(t *testing.T) {
 				t.Errorf("VolumeId labels = %v, want exactly [%s]", values, tt.volume)
 			}
 		})
+	}
+}
+
+// tenantRule is the CDS-3311 example: drop data points whose tenant label is blocked.
+var tenantRule = derivedLabelRule{
+	Target:        "tenant",
+	Sources:       []string{"Solution", "Environment"},
+	ExcludeValues: []string{"dev"},
+	DropValues:    []string{"tenant-x", "tenant-y"},
+}
+
+func labels(kv ...string) []*commonpb.StringKeyValue {
+	ll := make([]*commonpb.StringKeyValue, 0, len(kv)/2)
+	for i := 0; i < len(kv); i += 2 {
+		ll = append(ll, &commonpb.StringKeyValue{Key: kv[i], Value: kv[i+1]})
+	}
+	return ll
+}
+
+func Test_shouldDrop(t *testing.T) {
+	testCases := []struct {
+		name   string
+		rules  []derivedLabelRule
+		labels []*commonpb.StringKeyValue
+		want   bool
+	}{
+		{name: "match", rules: []derivedLabelRule{tenantRule}, labels: labels("tenant", "tenant-x"), want: true},
+		{name: "no match", rules: []derivedLabelRule{tenantRule}, labels: labels("tenant", "tenant-z"), want: false},
+		{name: "case and whitespace insensitive", rules: []derivedLabelRule{tenantRule}, labels: labels("tenant", " Tenant-X "), want: true},
+		{name: "value on another key", rules: []derivedLabelRule{tenantRule}, labels: labels("Solution", "tenant-x"), want: false},
+		{name: "any duplicate key matches", rules: []derivedLabelRule{tenantRule}, labels: labels("tenant", "tenant-z", "tenant", "tenant-y"), want: true},
+		{name: "no target label", rules: []derivedLabelRule{tenantRule}, labels: labels("VolumeId", "vol-a"), want: false},
+		{name: "empty drop_values", rules: []derivedLabelRule{{Target: "tenant", Sources: []string{"Solution"}, DropValues: []string{}}}, labels: labels("tenant", "tenant-x"), want: false},
+		{name: "nil drop_values", rules: []derivedLabelRule{{Target: "tenant", Sources: []string{"Solution"}}}, labels: labels("tenant", "tenant-x"), want: false},
+		{name: "no rules", labels: labels("tenant", "tenant-x"), want: false},
+	}
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldDrop(tt.rules, tt.labels); got != tt.want {
+				t.Errorf("shouldDrop() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// tenantFixture returns EBS resources and one metric per volume, covering a derived value,
+// existing-label precedence, the static fallback and a metric with no matching resource.
+func tenantFixture(t *testing.T) (map[string][]*model.TaggedResource, []byte) {
+	t.Helper()
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked", tags("Solution", "Tenant-X")),                           // derived tenant=Tenant-X
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),                           // derived tenant=tenant-z
+		ebsVolume("vol-env-blocked", tags("Solution", "", "Environment", "tenant-y")),    // falls back to Environment
+		ebsVolume("vol-tag-wins", tags("tenant", "tenant-z", "Solution", "tenant-x")),    // existing tag wins: kept
+		ebsVolume("vol-tag-blocked", tags("tenant", "tenant-x", "Solution", "tenant-z")), // existing tag wins: dropped
+		ebsVolume("vol-excluded", tags("Environment", "dev")),                            // no tenant: static fallback
+	}}
+	data, err := createTestDataFromMetrics([]*metricspb.Metric{
+		ebsVolumeMetric("vol-blocked"),
+		ebsVolumeMetric("vol-allowed"),
+		ebsVolumeMetric("vol-env-blocked"),
+		ebsVolumeMetric("vol-tag-wins"),
+		ebsVolumeMetric("vol-tag-blocked"),
+		ebsVolumeMetric("vol-excluded"),
+		ebsVolumeMetric("vol-unknown"), // no matching resource
+	})
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+	return resources, data
+}
+
+func Test_enhanceRecordData_DropValues(t *testing.T) {
+	testCases := []struct {
+		name          string
+		rules         []derivedLabelRule
+		staticLabels  map[string]string
+		defaultLabels bool
+		wantVolumes   []string
+		wantDropped   int
+	}{
+		{
+			name:         "derived and existing labels decide",
+			rules:        []derivedLabelRule{tenantRule},
+			staticLabels: map[string]string{},
+			wantVolumes:  []string{"vol-allowed", "vol-excluded", "vol-tag-wins", "vol-unknown"},
+			wantDropped:  3,
+		},
+		{
+			name:          "static fallback counts, also without a matching resource",
+			rules:         []derivedLabelRule{tenantRule},
+			staticLabels:  map[string]string{"tenant": "tenant-x"},
+			defaultLabels: true,
+			// vol-tag-wins also gets the static tenant label (static labels are appended even
+			// when a tag has the same key), and any label with the key counts.
+			wantVolumes: []string{"vol-allowed"},
+			wantDropped: 6,
+		},
+	}
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			resources, data := tenantFixture(t)
+			l := slog.New(slog.NewTextHandler(io.Discard, nil))
+			got, dropped, err := enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, tt.staticLabels, tt.defaultLabels, tt.rules)
+			if err != nil {
+				t.Fatalf("enhanceRecordData() error = %v", err)
+			}
+			if dropped != tt.wantDropped {
+				t.Errorf("dropped = %d, want %d", dropped, tt.wantDropped)
+			}
+			var volumes []string
+			for v := range labelsByVolume(t, got) {
+				volumes = append(volumes, v)
+			}
+			sort.Strings(volumes)
+			if !reflect.DeepEqual(volumes, tt.wantVolumes) {
+				t.Errorf("kept volumes = %v, want %v", volumes, tt.wantVolumes)
+			}
+		})
+	}
+}
+
+// Existing configs must be unaffected: the same input with no or empty drop_values
+// produces byte-identical output.
+func Test_enhanceRecordData_DropValuesUnsetUnchanged(t *testing.T) {
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	run := func(rule derivedLabelRule) []byte {
+		resources, data := tenantFixture(t)
+		out, dropped, err := enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{"tenant": "tenant-x"}, true, []derivedLabelRule{rule})
+		if err != nil {
+			t.Fatalf("enhanceRecordData() error = %v", err)
+		}
+		if dropped != 0 {
+			t.Fatalf("dropped = %d, want 0", dropped)
+		}
+		return out
+	}
+	unset := tenantRule
+	unset.DropValues = nil
+	empty := tenantRule
+	empty.DropValues = []string{}
+	if a, b := run(unset), run(empty); !bytes.Equal(a, b) {
+		t.Errorf("output differs between unset and empty drop_values")
+	}
+}
+
+func Test_processRecord(t *testing.T) {
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked", tags("Solution", "tenant-x")),
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),
+	}}
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	enhance := func(data []byte) ([]byte, int, error) {
+		return enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{tenantRule})
+	}
+	record := func(id string, volumes ...string) events.KinesisFirehoseEventRecord {
+		mm := make([]*metricspb.Metric, 0, len(volumes))
+		for _, v := range volumes {
+			mm = append(mm, ebsVolumeMetric(v))
+		}
+		data, err := createTestDataFromMetrics(mm)
+		if err != nil {
+			t.Fatalf("failed to create test data: %v", err)
+		}
+		return events.KinesisFirehoseEventRecord{RecordID: id, Data: data}
+	}
+
+	testCases := []struct {
+		name        string
+		record      events.KinesisFirehoseEventRecord
+		wantResult  string
+		wantVolumes []string
+		wantDropped int
+	}{
+		{name: "fully dropped", record: record("r1", "vol-blocked"), wantResult: "Dropped", wantDropped: 1},
+		{name: "partially dropped", record: record("r2", "vol-blocked", "vol-allowed"), wantResult: "Ok", wantVolumes: []string{"vol-allowed"}, wantDropped: 1},
+		{name: "nothing dropped", record: record("r3", "vol-allowed"), wantResult: "Ok", wantVolumes: []string{"vol-allowed"}},
+	}
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, dropped, err := processRecord(tt.record, enhance)
+			if err != nil {
+				t.Fatalf("processRecord() error = %v", err)
+			}
+			if got.RecordID != tt.record.RecordID {
+				t.Errorf("RecordID = %q, want %q", got.RecordID, tt.record.RecordID)
+			}
+			if got.Result != tt.wantResult {
+				t.Errorf("Result = %q, want %q", got.Result, tt.wantResult)
+			}
+			if dropped != tt.wantDropped {
+				t.Errorf("dropped = %d, want %d", dropped, tt.wantDropped)
+			}
+			var volumes []string
+			for v := range labelsByVolume(t, got.Data) {
+				volumes = append(volumes, v)
+			}
+			sort.Strings(volumes)
+			if !reflect.DeepEqual(volumes, tt.wantVolumes) {
+				t.Errorf("kept volumes = %v, want %v", volumes, tt.wantVolumes)
+			}
+		})
+	}
+}
+
+// The Firehose response is JSON; every record's data must be a base64 string, including Dropped.
+func Test_processRecord_ResponseJSON(t *testing.T) {
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked", tags("Solution", "tenant-x")),
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),
+	}}
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	enhance := func(data []byte) ([]byte, int, error) {
+		return enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{tenantRule})
+	}
+	var resp events.KinesisFirehoseResponse
+	for id, volume := range map[string]string{"r-blocked": "vol-blocked", "r-allowed": "vol-allowed"} {
+		data, err := createTestDataFromMetrics([]*metricspb.Metric{ebsVolumeMetric(volume)})
+		if err != nil {
+			t.Fatalf("failed to create test data: %v", err)
+		}
+		rec, _, err := processRecord(events.KinesisFirehoseEventRecord{RecordID: id, Data: data}, enhance)
+		if err != nil {
+			t.Fatalf("processRecord() error = %v", err)
+		}
+		resp.Records = append(resp.Records, rec)
+	}
+
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var parsed struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	got := map[string]map[string]any{}
+	for _, r := range parsed.Records {
+		got[r["recordId"].(string)] = r
+	}
+	if len(got) != 2 {
+		t.Fatalf("records = %s, want r-blocked and r-allowed", raw)
+	}
+
+	for id, want := range map[string]struct {
+		result  string
+		volumes []string
+	}{
+		"r-blocked": {result: "Dropped"},
+		"r-allowed": {result: "Ok", volumes: []string{"vol-allowed"}},
+	} {
+		r, ok := got[id]
+		if !ok {
+			t.Fatalf("record %s missing from %s", id, raw)
+		}
+		if r["result"] != want.result {
+			t.Errorf("%s result = %v, want %s", id, r["result"], want.result)
+		}
+		s, ok := r["data"].(string)
+		if !ok {
+			t.Fatalf("%s data = %#v, want a JSON string", id, r["data"])
+		}
+		decoded, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("%s data is not base64: %v", id, err)
+		}
+		if want.volumes == nil && s != "" {
+			t.Errorf("%s data = %q, want \"\"", id, s)
+		}
+		var volumes []string
+		for v := range labelsByVolume(t, decoded) {
+			volumes = append(volumes, v)
+		}
+		if !reflect.DeepEqual(volumes, want.volumes) {
+			t.Errorf("%s volumes = %v, want %v", id, volumes, want.volumes)
+		}
+	}
+}
+
+func Test_processRecord_Error(t *testing.T) {
+	enhance := func([]byte) ([]byte, int, error) { return nil, 0, fmt.Errorf("boom") }
+	if _, _, err := processRecord(events.KinesisFirehoseEventRecord{RecordID: "r1"}, enhance); err == nil {
+		t.Fatal("processRecord() error = nil, want error")
+	}
+}
+
+// Exercises compaction and pruning: blocked and allowed points within one metric, several
+// size-delimited requests, and an unsupported metric type that is never filtered.
+func Test_enhanceRecordData_DropValuesStructure(t *testing.T) {
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {
+		ebsVolume("vol-blocked-1", tags("Solution", "tenant-x")),
+		ebsVolume("vol-blocked-2", tags("Solution", "tenant-y")),
+		ebsVolume("vol-allowed", tags("Solution", "tenant-z")),
+	}}
+	summary := func(volumes ...string) *metricspb.Metric {
+		m := ebsVolumeMetric(volumes[0])
+		for _, v := range volumes[1:] {
+			m.GetDoubleSummary().DataPoints = append(m.GetDoubleSummary().DataPoints, ebsVolumeMetric(v).GetDoubleSummary().DataPoints...)
+		}
+		return m
+	}
+	gauge := &metricspb.Metric{
+		Name: "unsupported",
+		Data: &metricspb.Metric_DoubleGauge{DoubleGauge: &metricspb.DoubleGauge{
+			DataPoints: []*metricspb.DoubleDataPoint{{Labels: labels("tenant", "tenant-x")}},
+		}},
+	}
+	request := func(mm ...*metricspb.Metric) *metricsservicepb.ExportMetricsServiceRequest {
+		return &metricsservicepb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+			InstrumentationLibraryMetrics: []*metricspb.InstrumentationLibraryMetrics{{Metrics: mm}},
+		}}}
+	}
+	data, err := requestsIntoRawData([]*metricsservicepb.ExportMetricsServiceRequest{
+		request(summary("vol-blocked-1", "vol-allowed", "vol-blocked-2"), gauge), // mixed + unsupported
+		request(summary("vol-blocked-1", "vol-blocked-2")),                       // fully dropped
+		request(summary("vol-allowed")),                                          // untouched
+	})
+	if err != nil {
+		t.Fatalf("failed to create test data: %v", err)
+	}
+
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	out, dropped, err := enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-east-1"), false, nil, time.Hour, false, map[string]string{}, false, []derivedLabelRule{tenantRule})
+	if err != nil {
+		t.Fatalf("enhanceRecordData() error = %v", err)
+	}
+	if dropped != 4 {
+		t.Errorf("dropped = %d, want 4", dropped)
+	}
+
+	reqs, err := rawDataIntoRequests(out)
+	if err != nil {
+		t.Fatalf("failed to decode output: %v", err)
+	}
+	// Per request: metric name -> data point count. The fully dropped request is gone.
+	var got []map[string]int
+	var volumes []string
+	for _, req := range reqs {
+		counts := map[string]int{}
+		for _, rm := range req.ResourceMetrics {
+			for _, ilm := range rm.InstrumentationLibraryMetrics {
+				for _, m := range ilm.Metrics {
+					switch d := m.Data.(type) {
+					case *metricspb.Metric_DoubleSummary:
+						counts[m.Name] += len(d.DoubleSummary.DataPoints)
+						for _, dp := range d.DoubleSummary.DataPoints {
+							for _, l := range dp.Labels {
+								if l.Key == "VolumeId" {
+									volumes = append(volumes, l.Value)
+								}
+							}
+						}
+					case *metricspb.Metric_DoubleGauge:
+						counts[m.Name] += len(d.DoubleGauge.DataPoints)
+					}
+				}
+			}
+		}
+		got = append(got, counts)
+	}
+	ebs := "amazonaws.com/AWS/EBS/VolumeWriteBytes"
+	want := []map[string]int{{ebs: 1, "unsupported": 1}, {ebs: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("data points per request = %v, want %v", got, want)
+	}
+	if want := []string{"vol-allowed", "vol-allowed"}; !reflect.DeepEqual(volumes, want) {
+		t.Errorf("kept volumes = %v, want %v", volumes, want)
 	}
 }
