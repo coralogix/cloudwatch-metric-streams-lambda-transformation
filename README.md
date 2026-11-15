@@ -47,9 +47,20 @@ There is a couple of configuration options that can be set via environment varia
 | `FILE_CACHE_EXPIRATION`          | `1h`    | `<duration>`     | Sets the expiration time for the cached resources. See [Caching resources](#caching-resources) for more details.
 | `STATIC_LABELS`                  |         | `<json_array>`   | JSON array of key=value pairs to add as static labels to metrics. Example: `["env=production","team=platform"]`.
 | `DEFAULT_LABELS`                 | `false` | `true`           | When enabled, static labels are added to all metrics even if resource tags cannot be resolved. Acts as a fallback mechanism for consistent labeling across all metrics.
-| `DERIVED_LABELS`                 |         | `<json_array>`   | JSON array of rules (`target`, `sources`, `exclude_values`). Each adds the `target` label, copied from the first resource tag in `sources` that exists, isn't empty and isn't in `exclude_values` (case-insensitive). Example: `[{"target":"cost_center","sources":["CostCenter","Department"],"exclude_values":["none"]}]`. An existing tag or metric label with the same key takes precedence, and a derived label takes precedence over a static label with the same key.
+| `DERIVED_LABELS`                 |         | `<json_array>`   | JSON array of rules (`target`, `sources`, `exclude_values`, `drop_values`). Each adds the `target` label, copied from the first resource tag in `sources` that exists, isn't empty and isn't in `exclude_values` (case-insensitive). Example: `[{"target":"cost_center","sources":["CostCenter","Department"],"exclude_values":["none"]}]`. An existing tag or metric label with the same key takes precedence, and a derived label takes precedence over a static label with the same key. Optional `drop_values` drops matching data points, see [Dropping data points](#dropping-data-points).
 | `CROSS_ACCOUNT_ENABLED`          | `false` | `true`           | Enables cross-account tag enrichment for metrics from linked accounts via AWS OAM. See [Cross-Account Tag Enrichment](#cross-account-tag-enrichment) for more details.
 | `CROSS_ACCOUNT_ROLES`            |         | `<json_object>`  | JSON map of linked account IDs to IAM role ARNs to assume for tag enrichment. Example: `{"123456789012":"arn:aws:iam::123456789012:role/CoralogixMetricsReader"}`. Required when `CROSS_ACCOUNT_ENABLED=true`.
+
+### Dropping data points
+A `DERIVED_LABELS` rule can set `drop_values` to drop data points before they reach Coralogix. Example:
+```
+[{"target":"tenant","sources":["Solution","Environment"],"exclude_values":["dev"],"drop_values":["tenant-a","tenant-b"]}]
+```
+- After all labels are added, a data point is dropped if any label with the rule's `target` key has a value in `drop_values` (case-insensitive). That covers a derived value, an existing tag or metric label with the same key, and a static label fallback.
+- Every data point is checked, including those whose resource couldn't be matched. If no label with the `target` key is present (for example tag enrichment failed, or the resource has none of the `sources` tags), the data point is forwarded.
+- A record whose data points are all dropped is returned to Firehose as `Dropped`. The number of dropped data points is logged at `info` level.
+- If `DERIVED_LABELS` is invalid, the error is logged, all rules are disabled and data is forwarded without filtering.
+- Requires v0.1.17 or later. Older versions forward data without filtering: v0.1.16 rejects the whole `DERIVED_LABELS` configuration when `drop_values` is present, which also disables derived labels, and earlier versions ignore `DERIVED_LABELS`. An existing Lambda function isn't updated automatically: update its code before configuring `drop_values`.
 
 ### Necessary permissions
 The Lambda will use its [execution role](https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html) to call other AWS APIs. You need to therefore ensure your Lambda's role has following permissions. You can use the following JSON to create an inline policy for your role, to grant all necessary permissions:

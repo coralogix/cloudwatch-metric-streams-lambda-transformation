@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -157,26 +156,40 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 	}
 	cache.Refresh()
 
+	enhance := func(data []byte) ([]byte, int, error) {
+		return enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, data, resourcesPerNamespace, associatorsPerNamespace, region, crossAccountEnabled, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels, derivedLabels)
+	}
+	droppedTotal := 0
 	for _, record := range request.Records {
-		newData, err := enhanceRecordData(ctx, logger, fileCachePath, continueOnResourceFailure, record.Data, resourcesPerNamespace, associatorsPerNamespace, region, crossAccountEnabled, cache, fileCacheExpiration, fileCacheEnabled, staticLabels, defaultLabels, derivedLabels)
+		responseRecord, dropped, err := processRecord(record, enhance)
 		if err != nil {
 			logger.Error("Failed to enhance record data", "error", err)
 			return nil, err
 		}
-
-		// Resulting data must be Base64 encoded.
-		result := make([]byte, base64.StdEncoding.EncodedLen(len(newData)))
-		base64.StdEncoding.Encode(result, newData)
-		responseRecords = append(responseRecords, events.KinesisFirehoseResponseRecord{
-			RecordID: record.RecordID,
-			Result:   "Ok",
-			Data:     newData,
-		})
+		droppedTotal += dropped
+		responseRecords = append(responseRecords, responseRecord)
+	}
+	if droppedTotal > 0 {
+		logger.Info("Dropped data points matching drop_values", "count", droppedTotal)
 	}
 
 	return events.KinesisFirehoseResponse{
 		Records: responseRecords,
 	}, nil
+}
+
+// processRecord enhances one Firehose record. A record whose data points were all dropped
+// by drop_values is returned as "Dropped"; the RecordID is always preserved.
+func processRecord(record events.KinesisFirehoseEventRecord, enhance func([]byte) ([]byte, int, error)) (events.KinesisFirehoseResponseRecord, int, error) {
+	data, dropped, err := enhance(record.Data)
+	if err != nil {
+		return events.KinesisFirehoseResponseRecord{}, 0, err
+	}
+	result := events.KinesisFirehoseTransformedStateOk
+	if dropped > 0 && len(data) == 0 {
+		result = events.KinesisFirehoseTransformedStateDropped
+	}
+	return events.KinesisFirehoseResponseRecord{RecordID: record.RecordID, Result: result, Data: data}, dropped, nil
 }
 
 func getOrCacheResourcesToEFS(ctx context.Context, logger *slog.Logger, client tagging.Client, fileCachePath, namespace, accountID string, region *string, cacheExpiration time.Duration, cacheEnabled bool) ([]*model.TaggedResource, error) {
@@ -258,7 +271,8 @@ func retrieveResources(ctx context.Context, namespace string, region *string, cl
 }
 
 // enhanceRecordData takes the raw data from the record, decodes it into slice of ExportMetricsServiceRequests,
-// looks up the resources for the metrics and adds the tags to the metrics.
+// looks up the resources for the metrics and adds the tags to the metrics. Data points matching a
+// rule's drop_values are removed; the returned count is how many were dropped.
 func enhanceRecordData(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -275,11 +289,12 @@ func enhanceRecordData(
 	staticLabels map[string]string,
 	defaultLabels bool,
 	derivedLabels []derivedLabelRule,
-) ([]byte, error) {
+) ([]byte, int, error) {
 	expMetricsReqs, err := rawDataIntoRequests(data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	dropped := 0
 
 	for _, req := range expMetricsReqs {
 		for _, ilms := range req.ResourceMetrics {
@@ -334,7 +349,7 @@ func enhanceRecordData(
 									if continueOnResourceFailure {
 										continue
 									}
-									return nil, err
+									return nil, 0, err
 								}
 								// Log first few resource ARNs for debugging
 								sampleARNs := ""
@@ -402,6 +417,17 @@ func enhanceRecordData(
 								})
 							}
 						}
+						// Runs after enrichment, on every data point (also those with no matching
+						// resource), so the final label value decides.
+						kept := t.DoubleSummary.DataPoints[:0]
+						for _, dp := range t.DoubleSummary.DataPoints {
+							if shouldDrop(derivedLabels, dp.Labels) {
+								dropped++
+								continue
+							}
+							kept = append(kept, dp)
+						}
+						t.DoubleSummary.DataPoints = kept
 					default:
 						logger.Debug("Unsupported metric type", "type", fmt.Sprintf("%T", t))
 					}
@@ -410,7 +436,45 @@ func enhanceRecordData(
 		}
 	}
 
-	return requestsIntoRawData(expMetricsReqs)
+	if dropped > 0 {
+		expMetricsReqs = pruneEmpty(expMetricsReqs)
+	}
+	out, err := requestsIntoRawData(expMetricsReqs)
+	return out, dropped, err
+}
+
+// pruneEmpty removes summary metrics left without data points, and then any containers left
+// empty, so a fully dropped record encodes to no data.
+func pruneEmpty(reqs []*metricsservicepb.ExportMetricsServiceRequest) []*metricsservicepb.ExportMetricsServiceRequest {
+	keptReqs := reqs[:0]
+	for _, req := range reqs {
+		keptRMs := req.ResourceMetrics[:0]
+		for _, rm := range req.ResourceMetrics {
+			keptILMs := rm.InstrumentationLibraryMetrics[:0]
+			for _, ilm := range rm.InstrumentationLibraryMetrics {
+				keptMetrics := ilm.Metrics[:0]
+				for _, m := range ilm.Metrics {
+					if s, ok := m.Data.(*metricspb.Metric_DoubleSummary); ok && len(s.DoubleSummary.DataPoints) == 0 {
+						continue
+					}
+					keptMetrics = append(keptMetrics, m)
+				}
+				ilm.Metrics = keptMetrics
+				if len(ilm.Metrics) > 0 {
+					keptILMs = append(keptILMs, ilm)
+				}
+			}
+			rm.InstrumentationLibraryMetrics = keptILMs
+			if len(rm.InstrumentationLibraryMetrics) > 0 {
+				keptRMs = append(keptRMs, rm)
+			}
+		}
+		req.ResourceMetrics = keptRMs
+		if len(req.ResourceMetrics) > 0 {
+			keptReqs = append(keptReqs, req)
+		}
+	}
+	return keptReqs
 }
 
 // buildCloudWatchMetric builds a CloudWatch Metric from the OTLP labels for
@@ -578,12 +642,14 @@ func initializeCrossAccountRoles(ctx context.Context, logger *slog.Logger, regio
 
 // derivedLabelRule adds a label named Target whose value is copied from the first
 // tag in Sources that is present on the resource, non-empty and not in ExcludeValues.
+// A data point whose final Target label matches DropValues is dropped.
 // Configured via the DERIVED_LABELS env var, e.g.
-// [{"target":"cost_center","sources":["CostCenter","Department"],"exclude_values":["none","n/a"]}]
+// [{"target":"cost_center","sources":["CostCenter","Department"],"exclude_values":["none","n/a"],"drop_values":["cc-999"]}]
 type derivedLabelRule struct {
 	Target        string   `json:"target"`
 	Sources       []string `json:"sources"`
 	ExcludeValues []string `json:"exclude_values"`
+	DropValues    []string `json:"drop_values"`
 }
 
 // parseDerivedLabels parses and validates the DERIVED_LABELS env var. Any invalid
@@ -622,6 +688,11 @@ func parseDerivedLabels(raw string) ([]derivedLabelRule, error) {
 				return nil, fmt.Errorf("rule %d (%s): target must not be one of its own sources", i, r.Target)
 			}
 		}
+		for _, v := range r.DropValues {
+			if strings.TrimSpace(v) == "" {
+				return nil, fmt.Errorf("rule %d (%s): drop_values must not contain empty strings", i, r.Target)
+			}
+		}
 	}
 
 	return rules, nil
@@ -640,7 +711,7 @@ func applyDerivedLabels(rules []derivedLabelRule, tags []model.Tag, existing []*
 		matched := false
 		for _, s := range r.Sources {
 			v, ok := tagValue(tags, s)
-			if !ok || strings.TrimSpace(v) == "" || isExcluded(v, r.ExcludeValues) {
+			if !ok || strings.TrimSpace(v) == "" || matchesAny(v, r.ExcludeValues) {
 				continue
 			}
 			labels = append(labels, &commonpb.StringKeyValue{Key: r.Target, Value: v})
@@ -664,10 +735,27 @@ func tagValue(tags []model.Tag, key string) (string, bool) {
 	return "", false
 }
 
-// isExcluded matches case-insensitively, so "None" and "none" are treated the same.
-func isExcluded(value string, excludeValues []string) bool {
+// shouldDrop reports whether any label named like a rule's Target has a value in that
+// rule's DropValues. Any label with the key counts (derived, existing tag or dimension,
+// static fallback), so a duplicate key can't slip a blocked value through.
+func shouldDrop(rules []derivedLabelRule, labels []*commonpb.StringKeyValue) bool {
+	for _, r := range rules {
+		if len(r.DropValues) == 0 {
+			continue
+		}
+		for _, l := range labels {
+			if l.Key == r.Target && matchesAny(l.Value, r.DropValues) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchesAny matches trimmed values case-insensitively, so "None" and "none" are treated the same.
+func matchesAny(value string, values []string) bool {
 	value = strings.TrimSpace(value)
-	for _, e := range excludeValues {
+	for _, e := range values {
 		if strings.EqualFold(value, strings.TrimSpace(e)) {
 			return true
 		}
