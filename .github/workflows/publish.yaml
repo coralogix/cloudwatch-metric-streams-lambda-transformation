@@ -5,21 +5,13 @@ name: publish
 # Commercial: firehose-metrics-transformer-<ver>.zip and firehose-metrics-transformer-fips-<ver>.zip,
 # each with a .sha256, are written once and never replaced. The unversioned
 # firehose-metrics-transformer.zip still tracks the newest release for existing deployments.
-#
-# GovCloud: skipped until the repository variable GOVCLOUD_PUBLISH is 'true'. Run this workflow
-# by hand with a version to publish a release made while GovCloud was switched off.
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Released version to publish to GovCloud, e.g. 0.1.18
-        required: true
 
 concurrency:
-  group: publish-${{ github.ref_name }}-${{ inputs.version }}
+  group: publish-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -30,7 +22,6 @@ jobs:
   # Both ZIPs are built before anything is uploaded, so a failed build cannot leave a version
   # published without its FIPS artifact.
   build:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -114,65 +105,3 @@ jobs:
           generate_release_notes: true
           files: release/*
 
-  publish-govcloud:
-    needs: [build, publish]
-    if: >-
-      ${{ !cancelled() && vars.GOVCLOUD_PUBLISH == 'true'
-          && (needs.publish.result == 'success' || github.event_name == 'workflow_dispatch') }}
-    environment: govcloud
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    env:
-      VERSION: ${{ needs.build.outputs.version || inputs.version }}
-      GOVCLOUD_ROLE_ARN: ${{ vars.GOVCLOUD_ROLE_ARN }}
-      GOVCLOUD_REGIONS: ${{ vars.GOVCLOUD_REGIONS }}
-      GOVCLOUD_BUCKET_PREFIX: ${{ vars.GOVCLOUD_BUCKET_PREFIX }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Resolve release
-        id: release
-        run: |
-          [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version '$VERSION' is not X.Y.Z."; exit 1; }
-          [ -n "$GOVCLOUD_ROLE_ARN" ] && [ -n "$GOVCLOUD_REGIONS" ] && [ -n "$GOVCLOUD_BUCKET_PREFIX" ] \
-            || { echo "::error::Set GOVCLOUD_ROLE_ARN, GOVCLOUD_BUCKET_PREFIX and GOVCLOUD_REGIONS on the govcloud environment."; exit 1; }
-          # The released commit, recorded on the GovCloud objects as on the commercial ones.
-          commit=$(git ls-remote origin "refs/tags/v$VERSION^{}" | cut -f1)
-          [ -n "$commit" ] || commit=$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)
-          [ -n "$commit" ] || { echo "::error::Tag v$VERSION does not exist."; exit 1; }
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "first_region=${GOVCLOUD_REGIONS%% *}" >> "$GITHUB_OUTPUT"
-
-      # GovCloud credentials cannot read the commercial bucket, but it is public. The checksum
-      # file was written by the commercial publish, so this ships exactly those bytes.
-      - name: Fetch the published FIPS ZIP
-        run: |
-          base=https://$AWS_SERVERLESS_BUCKET-$AWS_DEFAULT_REGION.s3.$AWS_DEFAULT_REGION.amazonaws.com
-          name=firehose-metrics-transformer-fips-$VERSION.zip
-          curl -fsSO "$base/$name"
-          curl -fsSO "$base/$name.sha256"
-          sha256sum -c "$name.sha256"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.GOVCLOUD_ROLE_ARN }}
-          aws-region: ${{ steps.release.outputs.first_region }}
-
-      # Uploaded to each region rather than relying on replication.
-      - name: Publish to GovCloud
-        env:
-          COMMIT: ${{ steps.release.outputs.commit }}
-        run: |
-          name=firehose-metrics-transformer-fips
-          for region in $GOVCLOUD_REGIONS; do
-            # configure-aws-credentials exports AWS_REGION, which the CLI prefers.
-            export AWS_DEFAULT_REGION=$region AWS_REGION=$region
-            bucket=$GOVCLOUD_BUCKET_PREFIX-$region
-            # The scripts stamp GITHUB_SHA on each object; use the released commit, not main.
-            GITHUB_SHA=$COMMIT bash ci/upload-versioned.sh "$name-$VERSION.zip" "$bucket" "$name-$VERSION.zip"
-            GITHUB_SHA=$COMMIT bash ci/put-latest.sh "s3://$bucket/$name-$VERSION.zip" "$bucket" "$name.zip" "$VERSION"
-          done

@@ -34,10 +34,3 @@ For each new version a GitHub release is created. To prepare a new release, foll
 4. The `publish` workflow builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced: to fix a release, tag a new version. The unversioned `firehose-metrics-transformer.zip` moves to the new version. It then creates a _draft_ release with these files attached.
 5. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and check that the ZIP and `.sha256` files are attached.
 6. Once everything is ready, publish the release.
-
-### GovCloud
-
-When the repository variable `GOVCLOUD_PUBLISH` is `true`, the `publish` workflow also copies the FIPS ZIP to the GovCloud buckets, using the `GOVCLOUD_ROLE_ARN`, `GOVCLOUD_BUCKET_PREFIX` and `GOVCLOUD_REGIONS` variables of the `govcloud` environment. To publish a version that was released while GovCloud publishing was off, run the workflow manually with that version:
-```
-   gh workflow run publish.yaml -f version=<semantic_version>
-```
