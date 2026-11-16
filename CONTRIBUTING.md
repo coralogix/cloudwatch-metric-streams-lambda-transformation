@@ -19,18 +19,10 @@ We require all of our commits to be signed, please make sure they are signed by 
 
 ## Release Process
 
-For each new version a GitHub release is created. To prepare a new release, follow these steps:
+For each new version a GitHub release is created. To release:
 
-1. Make sure all the changes you want to release are merged into the `main` branch and you have latest `main` branch checked out locally.
-2. Create a tag for the new version on your local machine by running the following. Replace `<semantic_version>` with the new version number:
-```
-   tag=<semantic_version>
-   git tag -s "v${tag}" -m "v${tag}"
-```
-3. Push the tag to GitHub:
-```
-   git push origin "v${tag}"
-```
-4. The `publish` workflow builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced: to fix a release, tag a new version. The unversioned `firehose-metrics-transformer.zip` moves to the new version. It then creates a _draft_ release with these files attached.
-5. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and check that the ZIP and `.sha256` files are attached.
-6. Once everything is ready, publish the release.
+1. In your PR (or a separate one), set `VERSION` to the new semantic version, for example `0.1.18`. Merges that don't change `VERSION` publish nothing.
+2. Merge to `main`. The `publish` workflow checks that the version is new and not older than the latest release.
+3. The workflow builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced: to fix a release, bump `VERSION` again. The unversioned `firehose-metrics-transformer.zip` moves to the new version. It then creates the `v<version>` tag and a _draft_ release with these files attached.
+4. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and check that the ZIP and `.sha256` files are attached.
+5. Once everything is ready, publish the release.
