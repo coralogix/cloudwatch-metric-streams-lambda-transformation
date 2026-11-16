@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/fips140"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,10 @@ var (
 )
 
 func main() {
+	// ponytail: warn instead of failing, so GovCloud stacks still on the commercial ZIP keep running.
+	if strings.HasPrefix(os.Getenv("AWS_REGION"), "us-gov-") && !fips140.Enabled() {
+		newLogger(os.Getenv("LOG_LEVEL")).Error("FIPS 140-3 mode is off in GovCloud; deploy the firehose-metrics-transformer-fips ZIP")
+	}
 	lambda.Start(lambdaHandler)
 }
 

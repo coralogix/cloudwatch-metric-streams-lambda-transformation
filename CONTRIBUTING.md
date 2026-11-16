@@ -31,6 +31,6 @@ For each new version a GitHub release is created. To prepare a new release, foll
 ```
    git push origin "v${tag}"
 ```
-4. GitHub action will automatically create a new _draft_ release after running all the required CI jobs.
-5. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and double check that the `bootstrap.zip` file is attached to the release.
+4. The `publish` workflow builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced: to fix a release, tag a new version. The unversioned `firehose-metrics-transformer.zip` moves to the new version. It then creates a _draft_ release with these files attached.
+5. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and check that the ZIP and `.sha256` files are attached.
 6. Once everything is ready, publish the release.
