@@ -1,17 +1,30 @@
 name: publish
 
-# A release is a pushed vX.Y.Z tag. Merging to main publishes nothing.
+# Every merge to main that changes the code is released: ci/next-version.sh bumps the patch of
+# the newest tag, or minor/major when a PR merged since then has that label; skip-release skips
+# it. The workflow tags the commit first, to reserve the version, then uploads the artifacts and
+# publishes the GitHub release.
 #
 # Commercial: firehose-metrics-transformer-<ver>.zip and firehose-metrics-transformer-fips-<ver>.zip,
 # each with a .sha256, are written once and never replaced. The unversioned
 # firehose-metrics-transformer.zip still tracks the newest release for existing deployments.
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - '!**_test.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+  # Releases main's head on demand, e.g. after a merge that only touched CI. Same version rules.
+  workflow_dispatch:
 
+# One release at a time. GitHub keeps only the newest pending run, which is fine here: the
+# version is computed when a run starts, so a dropped run's changes ship with the next one.
 concurrency:
-  group: publish-${{ github.ref_name }}
+  group: publish
   cancel-in-progress: false
 
 env:
@@ -22,34 +35,44 @@ jobs:
   # Both ZIPs are built before anything is uploaded, so a failed build cannot leave a version
   # published without its FIPS artifact.
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read # labels of the PRs merged since the last release
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # next-version.sh needs the tags and history
 
-      - name: Read version from tag
+      - name: Compute version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          v=${GITHUB_REF_NAME#v}
-          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag $GITHUB_REF_NAME is not vX.Y.Z."; exit 1; }
+          v=$(bash ci/next-version.sh "$GITHUB_SHA")
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ -n "$v" ]; then echo "Releasing v$v"; else echo "Nothing to release."; fi
 
       - name: Set up Go
+        if: steps.version.outputs.version != ''
         uses: actions/setup-go@v5
         with:
           go-version: 1.26.x
 
       - name: Build and package
+        if: steps.version.outputs.version != ''
         run: make package
 
       - name: Build and package FIPS
+        if: steps.version.outputs.version != ''
         run: make package-fips
 
       - uses: actions/upload-artifact@v4
+        if: steps.version.outputs.version != ''
         with:
           name: dist
           path: firehose-metrics-transformer*.zip
@@ -57,6 +80,7 @@ jobs:
 
   publish:
     needs: build
+    if: needs.build.outputs.version != ''
     environment: production
     runs-on: ubuntu-latest
     permissions:
@@ -67,6 +91,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # The tag reserves the version before anything is uploaded, so a release that fails
+      # halfway keeps its version and the next merge picks the one after it.
+      - name: Reserve the version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # An annotated tag also lists its peeled ^{} line, which is the commit: prefer it.
+          tagged=$(git ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | sort -k2 -r | awk 'NR==1{print $1}')
+          if [ -z "$tagged" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA" >/dev/null
+          elif [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::v$VERSION is tagged on $tagged, not $GITHUB_SHA."; exit 1
+          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -98,10 +136,21 @@ jobs:
             done
           done
 
-      - name: Create a draft release
+      # GitHub's "Latest" must not move back when an older release is re-run (S3 latest
+      # has the same rule in put-latest.sh).
+      - name: Check whether this is the newest release
+        id: latest
+        run: |
+          newest=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "make_latest=$([ "$newest" = "v$VERSION" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          make_latest: ${{ steps.latest.outputs.make_latest }}
           generate_release_notes: true
           files: release/*
 
