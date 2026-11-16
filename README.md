@@ -19,12 +19,12 @@ To install it automatically, you have a choice of 3 options:
 3. [Terraform Module](https://github.com/coralogix/terraform-coralogix-aws/tree/master/examples/firehose-metrics)
 
 ### Manual Installation
-1. Download the `bootstrap.zip` file from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make package`.
+1. Download `firehose-metrics-transformer-<version>.zip` from the [releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page. Unless instructed otherwise, we recommend downloading the latest release. In AWS GovCloud, use `firehose-metrics-transformer-fips-<version>.zip`, which is built with the FIPS 140-3 validated Go Cryptographic Module and runs in FIPS mode. Alternatively, you can test, lint and build the zipped Lambda function by yourself by running `make package` (or `make package-fips`).
 2. Create a new AWS Lambda function in your designated region with the following parameters:
     - Runtime: `Custom runtime on Amazon Linux 2023 (provided.al2023)`
     - Handler: `bootstrap`
     - Architecture: `arm64` (but you can also build the function for `x86_64`)
-3. Upload the `bootstrap.zip` file as the code source.
+3. Upload the ZIP file as the code source.
 4. Make sure to set the memory. We recommend starting with `128 MB` and, depending on the number of metrics you export and speed of Lambda processing, see if you need to increase it.
 5. Adjust the role of the Lambda function as described below in section [Necessary permissions](#necessary-permissions).
 6. Optionally, add environment variables to configure the Lambda, as described in the [Configuration](#configuration) section.

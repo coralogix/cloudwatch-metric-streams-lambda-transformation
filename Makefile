@@ -1,11 +1,11 @@
 BINARY_FILE_NAME ?= "bootstrap"
 ZIP_FILE_NAME ?= "firehose-metrics-transformer.zip"
+FIPS_ZIP_FILE_NAME ?= "firehose-metrics-transformer-fips.zip"
+# Go Cryptographic Module v1.0.0, the FIPS 140-3 validated version.
+GOFIPS140_VERSION ?= v1.0.0
 ## By default, build for Linux on amd64, as that's the Lambda architecture we'll be using.
 ARCH ?= "arm64"
 OS ?= "linux"
-
-.PHONY: publish
-publish: s3-publish
 
 .PHONY: package
 package: mod test build zip
@@ -35,11 +35,17 @@ build:
 
 .PHONY: zip
 zip:
+	rm -f ${ZIP_FILE_NAME}
 	zip ${ZIP_FILE_NAME} ${BINARY_FILE_NAME}
 
-.PHONY: s3-publish-function
-s3-publish:
-	aws s3 cp ${ZIP_FILE_NAME} s3://${AWS_SERVERLESS_BUCKET}-${AWS_DEFAULT_REGION}/${ZIP_FILE_NAME}
+## FIPS build for GovCloud. Fails if the binary does not embed the validated module.
+.PHONY: package-fips
+package-fips:
+	GOFIPS140=${GOFIPS140_VERSION} $(MAKE) build zip ZIP_FILE_NAME=${FIPS_ZIP_FILE_NAME}
+	go version -m ${BINARY_FILE_NAME} | grep -q 'GOFIPS140=${GOFIPS140_VERSION}' \
+		|| { echo "FIPS module ${GOFIPS140_VERSION} missing from ${BINARY_FILE_NAME}" >&2; exit 1; }
+	go version -m ${BINARY_FILE_NAME} | grep -q 'DefaultGODEBUG=.*fips140=on' \
+		|| { echo "fips140=on is not the default in ${BINARY_FILE_NAME}" >&2; exit 1; }
 
 .PHONY: gen-fixture
 gen-fixture:

@@ -43,3 +43,6 @@ jobs:
 
       - name: Test build
         run: make build
+
+      - name: Test FIPS build
+        run: make package-fips
