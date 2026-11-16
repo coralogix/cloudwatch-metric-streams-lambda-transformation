@@ -1,0 +1,35 @@
+name: release-reminder
+
+# Merging to main publishes nothing; a release needs a pushed vX.Y.Z tag (see CONTRIBUTING.md).
+# This posts a Slack reminder when code lands on main so the tag isn't forgotten.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release reminder to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -n "${SLACK_WEBHOOK_URL:-}" ] || { echo "SLACK_WEBHOOK_URL not set; skipping"; exit 0; }
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name || echo unknown)
+          sha=${GITHUB_SHA::7}
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
+          text="Firehose metrics processor: <$url|\`$sha\`> merged to main, *not released* (latest \`$latest\`). To publish: \`git tag -s vX.Y.Z $sha && git push origin vX.Y.Z\`"
+          # A failed notification must not fail the run.
+          jq -n --arg text "$text" '{text: $text}' \
+            | curl -sf -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL" \
+            || echo "slack notification failed; continuing"
