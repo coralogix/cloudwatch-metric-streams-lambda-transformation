@@ -19,10 +19,13 @@ We require all of our commits to be signed, please make sure they are signed by 
 
 ## Release Process
 
-For each new version a GitHub release is created. To release:
+Every merge to `main` that changes the code (Go sources other than tests, `go.mod`, `go.sum` or the `Makefile`) is released automatically:
 
-1. In your PR (or a separate one), set `VERSION` to the new semantic version, for example `0.1.18`. Merges that don't change `VERSION` publish nothing.
-2. Merge to `main`. The `publish` workflow checks that the version is new and not older than the latest release.
-3. The workflow builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced: to fix a release, bump `VERSION` again. The unversioned `firehose-metrics-transformer.zip` moves to the new version. It then creates the `v<version>` tag and a _draft_ release with these files attached.
-4. Once the draft release is created, go to [Releases](https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases) page and open the new draft release. Edit the release notes as needed and check that the ZIP and `.sha256` files are attached.
-5. Once everything is ready, publish the release.
+1. The `publish` workflow takes the newest `vX.Y.Z` tag and bumps the patch version. Add the `minor` or `major` label to the PR for a bigger bump (the largest label on any PR merged since the last release wins), or `skip-release` to merge without releasing (for example to batch several PRs; the next release includes them).
+2. It builds the standard and FIPS ZIPs and uploads `firehose-metrics-transformer-<version>.zip` and `firehose-metrics-transformer-fips-<version>.zip`, each with a `.sha256` file, to the Coralogix serverless S3 buckets. Versioned files are written once and can't be replaced. The unversioned `firehose-metrics-transformer.zip` moves to the new version.
+   The commit is tagged `v<version>` before the upload, so a failed release keeps its version.
+3. It then publishes a GitHub release with these files and generated release notes. Edit the notes afterwards if needed.
+
+To release a merge that didn't touch the code, run the `publish` workflow manually on `main`. A manual run ignores `skip-release`.
+
+If a run fails, re-run it: a commit keeps the version it was given, and a commit already included in a newer release isn't released again.
