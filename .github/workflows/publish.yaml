@@ -40,6 +40,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read # labels of the PRs merged since the last release
+      id-token: write # sign the build provenance
+      attestations: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -70,6 +72,15 @@ jobs:
       - name: Build and package FIPS
         if: steps.version.outputs.version != ''
         run: make package-fips
+
+      # Signed build provenance for each ZIP: this workflow built these exact bytes from
+      # this commit. publish-govcloud.yaml checks it before copying to GovCloud, and anyone
+      # can check a download with `gh attestation verify <zip> --repo <this repo>`.
+      - name: Attest build provenance
+        if: steps.version.outputs.version != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: firehose-metrics-transformer*.zip
 
       - uses: actions/upload-artifact@v4
         if: steps.version.outputs.version != ''

@@ -1,0 +1,267 @@
+name: publish-govcloud
+
+# Copies a released version's FIPS ZIP to the GovCloud distribution account, outside the
+# FedRAMP boundary. Runs after a successful publish run on main while the GOVCLOUD_PUBLISH
+# repository variable is 'true', or by hand for any released version.
+#
+# Nothing is built here. publish already built firehose-metrics-transformer-fips-<ver>.zip
+# and wrote it once to the commercial bucket with a .sha256, and attested its build
+# provenance. This workflow checks both and uploads the same bytes. GovCloud
+# only ever gets the FIPS build, so there it is published without the -fips suffix, as
+# firehose-metrics-transformer-<ver>.zip.
+#
+# Kept out of publish so that a GovCloud failure never holds back the commercial release.
+
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released version to publish to GovCloud, e.g. 0.1.18
+        required: true
+
+# One run per version: a group keeps only one run pending, so a shared group would let a
+# later release evict an earlier one before it was published.
+concurrency:
+  group: publish-govcloud-${{ inputs.version || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+env:
+  # Where publish writes the versioned artifacts (its AWS_SERVERLESS_BUCKET-AWS_DEFAULT_REGION).
+  STAGING_URL: https://coralogix-serverless-repo-eu-central-1.s3.eu-central-1.amazonaws.com
+
+jobs:
+  # Finds the version and its release commit and verifies the staged artifact. No
+  # credentials yet: when the publish run released nothing, this ends the run.
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch'
+            || (vars.GOVCLOUD_PUBLISH == 'true'
+                && github.event.workflow_run.conclusion == 'success'
+                && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      digest: ${{ steps.verified.outputs.digest }}
+    steps:
+      - name: Find the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # GitHub API call with retries. Exit 4 only on a confirmed 404; any other
+          # failure is reported and fails the run, so an outage can never look like
+          # "nothing was released".
+          api() {
+            local attempt out
+            for attempt in 1 2 3; do
+              if out=$(gh api "$@" 2>api.err); then printf '%s' "$out"; return 0; fi
+              if grep -q 'HTTP 404' api.err; then return 4; fi
+              echo "::warning::gh api $1 failed (attempt $attempt of 3): $(cat api.err)" >&2
+              sleep $((attempt * 5))
+            done
+            echo "::error::gh api $1 failed: $(cat api.err)" >&2
+            return 1
+          }
+
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version=$(tr -d '[:space:]' <<<"$INPUT_VERSION")
+            version=${version#v}
+            [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$version' is not a version like 0.1.18."; exit 1; }
+            # The tag names the release commit; peel an annotated tag to its commit.
+            rc=0
+            ref=$(api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version") || rc=$?
+            [ "$rc" -ne 4 ] || { echo "::error::v$version has no tag, so it was not released."; exit 1; }
+            [ "$rc" -eq 0 ] || exit 1
+            commit=$(jq -r '.object.sha' <<<"$ref")
+            if [ "$(jq -r '.object.type' <<<"$ref")" = tag ]; then
+              commit=$(api "repos/$GITHUB_REPOSITORY/git/tags/$commit" --jq '.object.sha') \
+                || { echo "::error::Can't read annotated tag v$version."; exit 1; }
+            fi
+          else
+            # publish runs on every code push but skips some (skip-release); it tags the
+            # commit it releases, so a version tag on this commit is the sign it released.
+            # publish creates lightweight tags, which name the commit directly.
+            refs=$(api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate) \
+              || { echo "::error::Can't list the version tags."; exit 1; }
+            # --paginate prints one array per page; -s and add merge them.
+            version=$(jq -rs --arg sha "$HEAD_SHA" \
+              '[add[] | select(.object.sha == $sha) | .ref | ltrimstr("refs/tags/v")
+                | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first // empty' <<<"$refs")
+            if [ -z "$version" ]; then
+              echo "publish run on $HEAD_SHA released nothing (no version tag on it); nothing to do."
+              exit 0
+            fi
+            commit=$HEAD_SHA
+          fi
+
+          echo "Publishing $version ($commit) to GovCloud."
+          { echo "version=$version"; echo "commit=$commit"; } >> "$GITHUB_OUTPUT"
+
+      # Nothing here touches GovCloud; publish only runs once these checks pass.
+      - name: Download and verify the staged artifact
+        id: verified
+        if: ${{ steps.release.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          staged=firehose-metrics-transformer-fips-$VERSION.zip
+          published=firehose-metrics-transformer-$VERSION.zip
+          mkdir -p dist
+          curl -fsS --retry 3 -o "dist/$staged" "$STAGING_URL/$staged"
+          curl -fsS --retry 3 -o "dist/$staged.sha256" "$STAGING_URL/$staged.sha256"
+
+          # The sidecar must be exactly one "<sha256>  <this file's name>" line, and that
+          # digest must match this download. sha256sum -c alone would check whatever file
+          # the sidecar names.
+          sidecar=$(cat "dist/$staged.sha256")
+          if [ "$(wc -l < "dist/$staged.sha256")" -gt 1 ] \
+            || ! [[ $sidecar =~ ^([0-9a-f]{64})\ [\ *]([^[:space:]]+)$ ]] \
+            || [ "${BASH_REMATCH[2]}" != "$staged" ]; then
+            echo "::error::$staged.sha256 is not a single checksum line for $staged: '$sidecar'"
+            exit 1
+          fi
+          expected=${BASH_REMATCH[1]}
+          actual=$(sha256sum "dist/$staged" | cut -d' ' -f1)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::$staged has SHA-256 $actual, but its .sha256 says $expected."
+            exit 1
+          fi
+          echo "$staged: SHA-256 $actual matches"
+
+          # Signed provenance from publish.yaml's build: these exact bytes were built by that
+          # workflow, on a GitHub-hosted runner, from the release commit. Versions released
+          # before the build attested its ZIPs (0.1.18 and older) have none and stop here.
+          attestation=$(gh attestation verify "dist/$staged" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yaml" \
+            --source-digest "$COMMIT" --deny-self-hosted-runners --format json) \
+            || { echo "::error::$staged has no valid build provenance from publish.yaml at $COMMIT."; exit 1; }
+          # publish.yaml attests both builds of a release together, so the checks above
+          # would also pass the regular ZIP. Require these bytes to be the FIPS build's
+          # subject (its name as built, before the versioned rename).
+          jq -e --arg d "$actual" 'any(.[].verificationResult.statement.subject[];
+              .name == "firehose-metrics-transformer-fips.zip" and .digest.sha256 == $d)' \
+            <<<"$attestation" >/dev/null \
+            || { echo "::error::$staged is not the attested FIPS build (firehose-metrics-transformer-fips.zip)."; exit 1; }
+
+          mv "dist/$staged" "dist/$published"
+          rm "dist/$staged.sha256"
+          echo "digest=$actual" >> "$GITHUB_OUTPUT"
+
+      # The publish job uploads this verified file; it does not download again.
+      - name: Keep the verified artifact
+        if: ${{ steps.release.outputs.version != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: govcloud-dist
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: verify
+    if: ${{ needs.verify.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    # The distribution account's role trusts only this environment's sub claim, and the
+    # environment only allows main. No reviewer: the bucket holds public artifacts.
+    environment: govcloud
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      # Before any credentials are requested, so a misconfigured environment fails here
+      # instead of halfway through an upload.
+      - name: Check govcloud configuration
+        id: config
+        env:
+          ROLE_ARN: ${{ vars.GOVCLOUD_ROLE_ARN }}
+          BUCKET_PREFIX: ${{ vars.GOVCLOUD_BUCKET_PREFIX }}
+          REGIONS: ${{ vars.GOVCLOUD_REGIONS }}
+        run: |
+          set -euo pipefail
+          # Surrounding whitespace is dropped; anything else must be a valid value.
+          trim() { printf '%s' "$1" | tr '\n' ' ' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'; }
+          role_arn=$(trim "$ROLE_ARN")
+          bucket_prefix=$(trim "$BUCKET_PREFIX")
+          [ -n "$role_arn" ] || { echo "::error::GOVCLOUD_ROLE_ARN is not set on the govcloud environment."; exit 1; }
+          [ -n "$bucket_prefix" ] || { echo "::error::GOVCLOUD_BUCKET_PREFIX is not set on the govcloud environment."; exit 1; }
+          [[ $role_arn =~ ^arn:aws-us-gov:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]] || { echo "::error::GOVCLOUD_ROLE_ARN '$role_arn' is not a GovCloud IAM role ARN."; exit 1; }
+          [[ $bucket_prefix =~ ^[a-z0-9][a-z0-9.-]*$ ]] || { echo "::error::GOVCLOUD_BUCKET_PREFIX '$bucket_prefix' is not a valid bucket name prefix."; exit 1; }
+
+          # Space- or newline-separated.
+          read -ra regions <<<"$(tr '\n' ' ' <<<"$REGIONS")"
+          [ "${#regions[@]}" -gt 0 ] || { echo "::error::GOVCLOUD_REGIONS is not set on the govcloud environment."; exit 1; }
+          for region in "${regions[@]}"; do
+            case "$region" in
+              us-gov-west-1|us-gov-east-1) ;;
+              *) echo "::error::GOVCLOUD_REGIONS has '$region'; allowed: us-gov-west-1, us-gov-east-1."; exit 1 ;;
+            esac
+          done
+
+          {
+            echo "role_arn=$role_arn"
+            echo "bucket_prefix=$bucket_prefix"
+            echo "regions=${regions[*]}"
+            echo "first_region=${regions[0]}"
+          } >> "$GITHUB_OUTPUT"
+
+      # For ci/upload-versioned.sh only.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get the verified artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: govcloud-dist
+          path: dist
+
+      # The artifact store only warns on a digest mismatch; fail on one instead.
+      - name: Check the verified artifact
+        env:
+          DIGEST: ${{ needs.verify.outputs.digest }}
+        run: |
+          set -euo pipefail
+          file=dist/firehose-metrics-transformer-$VERSION.zip
+          [ "$(ls dist)" = "firehose-metrics-transformer-$VERSION.zip" ] || { echo "::error::Unexpected files: $(ls dist)"; exit 1; }
+          actual=$(sha256sum "$file" | cut -d' ' -f1)
+          [ -n "$DIGEST" ] && [ "$actual" = "$DIGEST" ] || { echo "::error::$file has SHA-256 $actual, verified was '$DIGEST'."; exit 1; }
+          echo "$file: SHA-256 $actual"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          role-to-assume: ${{ steps.config.outputs.role_arn }}
+          role-session-name: cw-metric-streams-${{ github.run_id }}
+          aws-region: ${{ steps.config.outputs.first_region }}
+
+      - name: Upload
+        env:
+          BUCKET_PREFIX: ${{ steps.config.outputs.bucket_prefix }}
+          REGIONS: ${{ steps.config.outputs.regions }}
+        run: |
+          set -euo pipefail
+          # Uploaded per region rather than relying on replication. upload-versioned.sh
+          # writes the key and its .sha256 with If-None-Match: *, so a re-run skips what is
+          # already there. The release commit, not this run's, is recorded as the key's
+          # owner, so a later manual run for the same version is not mistaken for another build.
+          key=firehose-metrics-transformer-$VERSION.zip
+          for region in $REGIONS; do
+            # Both: configure-aws-credentials exports AWS_REGION, which the CLI prefers.
+            export AWS_DEFAULT_REGION="$region" AWS_REGION="$region"
+            GITHUB_SHA="$COMMIT" bash ci/upload-versioned.sh "dist/$key" "${BUCKET_PREFIX}-${region}" "$key"
+          done
