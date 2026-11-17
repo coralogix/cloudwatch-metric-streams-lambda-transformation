@@ -143,10 +143,17 @@ jobs:
           # Signed provenance from publish.yaml's build: these exact bytes were built by that
           # workflow, on a GitHub-hosted runner, from the release commit. Versions released
           # before the build attested its ZIPs (0.1.18 and older) have none and stop here.
-          gh attestation verify "dist/$staged" --repo "$GITHUB_REPOSITORY" \
+          attestation=$(gh attestation verify "dist/$staged" --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yaml" \
-            --source-digest "$COMMIT" --deny-self-hosted-runners \
+            --source-digest "$COMMIT" --deny-self-hosted-runners --format json) \
             || { echo "::error::$staged has no valid build provenance from publish.yaml at $COMMIT."; exit 1; }
+          # publish.yaml attests both builds of a release together, so the checks above
+          # would also pass the regular ZIP. Require these bytes to be the FIPS build's
+          # subject (its name as built, before the versioned rename).
+          jq -e --arg d "$actual" 'any(.[].verificationResult.statement.subject[];
+              .name == "firehose-metrics-transformer-fips.zip" and .digest.sha256 == $d)' \
+            <<<"$attestation" >/dev/null \
+            || { echo "::error::$staged is not the attested FIPS build (firehose-metrics-transformer-fips.zip)."; exit 1; }
 
           mv "dist/$staged" "dist/$published"
           rm "dist/$staged.sha256"
