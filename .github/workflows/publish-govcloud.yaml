@@ -173,6 +173,10 @@ jobs:
     needs: verify
     if: ${{ needs.verify.outputs.version != '' }}
     runs-on: ubuntu-latest
+    outputs:
+      bucket_prefix: ${{ steps.config.outputs.bucket_prefix }}
+      regions: ${{ steps.config.outputs.regions }}
+      role_arn: ${{ steps.config.outputs.role_arn }}
     # The distribution account's role trusts only this environment's sub claim, and the
     # environment only allows main. No reviewer: the bucket holds public artifacts.
     environment: govcloud
@@ -264,4 +268,42 @@ jobs:
             # Both: configure-aws-credentials exports AWS_REGION, which the CLI prefers.
             export AWS_DEFAULT_REGION="$region" AWS_REGION="$region"
             GITHUB_SHA="$COMMIT" bash ci/upload-versioned.sh "dist/$key" "${BUCKET_PREFIX}-${region}" "$key"
+          done
+
+  # Runs the uploaded ZIP in each region (ci/govcloud/smoke.sh). Also runs when the upload
+  # found the version already there, so dispatching a version again re-tests it.
+  smoke:
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    environment: govcloud
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          role-to-assume: ${{ needs.publish.outputs.role_arn }}
+          role-session-name: cw-metric-streams-smoke-${{ github.run_id }}
+          aws-region: us-gov-west-1
+
+      - name: Smoke test
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          REGIONS: ${{ needs.publish.outputs.regions }}
+          BUCKET_PREFIX: ${{ needs.publish.outputs.bucket_prefix }}
+          SMOKE_BOUNDARY_ARN: ${{ vars.GOVCLOUD_SMOKE_BOUNDARY_ARN }}
+          # The attempt too, so a re-run never collides with a previous attempt's leftovers.
+          SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [ -n "$SMOKE_BOUNDARY_ARN" ] || { echo "::error::GOVCLOUD_SMOKE_BOUNDARY_ARN is not set on the govcloud environment."; exit 1; }
+          for region in $REGIONS; do
+            SMOKE_ARTIFACT_BUCKET="$BUCKET_PREFIX-$region" SMOKE_RUN_ID="$SMOKE_RUN_ID-$region" \
+              bash ci/govcloud/smoke.sh "$VERSION" "$region"
           done

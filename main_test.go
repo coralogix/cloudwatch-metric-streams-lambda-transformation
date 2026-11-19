@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/fips140"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1592,5 +1593,69 @@ func Test_enhanceRecordData_DropValuesStructure(t *testing.T) {
 	}
 	if want := []string{"vol-allowed", "vol-allowed"}; !reflect.DeepEqual(volumes, want) {
 		t.Errorf("kept volumes = %v, want %v", volumes, want)
+	}
+}
+
+// ci/govcloud/smoke.sh invokes the published GovCloud function with this event. Keeps the
+// fixture valid as the record format evolves; regenerate it with
+// UPDATE_SMOKE_EVENT=1 go test -run Test_smokeEvent .
+func Test_smokeEvent(t *testing.T) {
+	const path = "ci/govcloud/smoke-event.json"
+	if os.Getenv("UPDATE_SMOKE_EVENT") != "" {
+		data, err := createTestDataFromMetrics([]*metricspb.Metric{ebsVolumeMetric("vol-smoke")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.MarshalIndent(events.KinesisFirehoseEvent{
+			InvocationID: "smoke",
+			Records: []events.KinesisFirehoseEventRecord{{RecordID: "smoke-1", Data: data,
+				ApproximateArrivalTimestamp: events.MilliSecondsEpochTime{Time: time.Unix(1767225600, 0)}}},
+		}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event events.KinesisFirehoseEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(event.Records) != 1 {
+		t.Fatalf("got %d records, want 1", len(event.Records))
+	}
+	resources := map[string][]*model.TaggedResource{":AWS/EBS": {ebsVolume("vol-smoke", tags("Name", "smoke"))}}
+	l := slog.New(slog.NewTextHandler(io.Discard, nil))
+	enhance := func(data []byte) ([]byte, int, error) {
+		return enhanceRecordData(context.Background(), l, "", false, data, resources, map[string]maxdimassociator.Associator{}, aws.String("us-gov-west-1"), false, nil, time.Hour, false, map[string]string{}, false, nil)
+	}
+	got, _, err := processRecord(event.Records[0], enhance)
+	if err != nil {
+		t.Fatalf("processRecord() error = %v", err)
+	}
+	if got.Result != "Ok" || got.RecordID != "smoke-1" || len(labelsByVolume(t, got.Data)["vol-smoke"]) == 0 {
+		t.Fatalf("got %s %s with volumes %v, want Ok smoke-1 with vol-smoke", got.RecordID, got.Result, labelsByVolume(t, got.Data))
+	}
+}
+
+// The smoke test's FIPS evidence must report the real mode; checked with and without
+// GODEBUG=fips140=on.
+func Test_logBatchDone(t *testing.T) {
+	var buf bytes.Buffer
+	logBatchDone(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), 1)
+	var line struct {
+		Msg     string `json:"msg"`
+		FIPS140 *bool  `json:"fips140"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line.Msg != "Batch done" || line.FIPS140 == nil || *line.FIPS140 != fips140.Enabled() {
+		t.Fatalf("got %s, want Batch done with fips140=%v", buf.String(), fips140.Enabled())
 	}
 }

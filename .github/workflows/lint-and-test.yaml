@@ -41,6 +41,13 @@ jobs:
       - name: Run tests
         run: make test
 
+      # The smoke test's FIPS evidence must report fips140=true only in FIPS mode.
+      - name: Test FIPS evidence in FIPS mode
+        run: GODEBUG=fips140=on go test -run Test_logBatchDone .
+
+      - name: Test the GovCloud smoke check
+        run: ci/govcloud/test-smoke.sh
+
       - name: Test build
         run: make build
 

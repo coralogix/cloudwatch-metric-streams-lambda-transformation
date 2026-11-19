@@ -1,0 +1,20 @@
+{
+  "invocationId": "smoke",
+  "deliveryStreamArn": "",
+  "sourceKinesisStreamArn": "",
+  "region": "",
+  "records": [
+    {
+      "recordId": "smoke-1",
+      "approximateArrivalTimestamp": 1767225600000,
+      "data": "iQEKhgESgwESgAEKJmFtYXpvbmF3cy5jb20vQVdTL0VCUy9Wb2x1bWVXcml0ZUJ5dGVzGgVCeXRlc1pPCk0KHgoKTWV0cmljTmFtZRIQVm9sdW1lV3JpdGVCeXRlcwoUCglOYW1lc3BhY2USB0FXUy9FQlMKFQoIVm9sdW1lSWQSCXZvbC1zbW9rZQ==",
+      "kinesisRecordMetadata": {
+        "shardId": "",
+        "partitionKey": "",
+        "sequenceNumber": "",
+        "subsequenceNumber": 0,
+        "approximateArrivalTimestamp": -6795364578871
+      }
+    }
+  ]
+}

@@ -179,9 +179,16 @@ func lambdaHandler(ctx context.Context, request events.KinesisFirehoseEvent) (in
 		logger.Info("Dropped data points matching drop_values", "count", droppedTotal)
 	}
 
+	logBatchDone(logger, len(responseRecords))
 	return events.KinesisFirehoseResponse{
 		Records: responseRecords,
 	}, nil
+}
+
+// logBatchDone is the last log line of an invocation. ci/govcloud/smoke.sh requires it with
+// fips140=true as evidence that the deployed binary runs in FIPS 140-3 mode.
+func logBatchDone(logger *slog.Logger, records int) {
+	logger.Debug("Batch done", "records", records, "fips140", fips140.Enabled())
 }
 
 // processRecord enhances one Firehose record. A record whose data points were all dropped
