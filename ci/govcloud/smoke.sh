@@ -64,6 +64,9 @@ partition=$(aws sts get-caller-identity --query Arn --output text | cut -d: -f2)
 policy=arn:$partition:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 object_version=$(aws s3api head-object --bucket "$SMOKE_ARTIFACT_BUCKET" --key "$key" --query VersionId --output text) \
   || fail "s3://$SMOKE_ARTIFACT_BUCKET/$key is not there."
+# Pin the tested bytes when the bucket is versioned; the key itself is write-once either way.
+code="S3Bucket=$SMOKE_ARTIFACT_BUCKET,S3Key=$key"
+[ "$object_version" = None ] || [ -z "$object_version" ] || code="$code,S3ObjectVersion=$object_version"
 
 log "role $name"
 created_role=true
@@ -78,7 +81,7 @@ for attempt in $(seq 1 12); do
   if out=$(aws lambda create-function --function-name "$name" --role "$role_arn" \
       --runtime provided.al2023 --architectures arm64 --handler bootstrap --timeout 30 \
       --environment 'Variables={LOG_LEVEL=debug}' \
-      --code "S3Bucket=$SMOKE_ARTIFACT_BUCKET,S3Key=$key,S3ObjectVersion=$object_version" 2>&1); then
+      --code "$code" 2>&1); then
     created_function=true; break
   fi
   grep -q "cannot be assumed" <<<"$out" && [ "$attempt" -lt 12 ] || fail "Can't create $name: $(tail -n1 <<<"$out")"

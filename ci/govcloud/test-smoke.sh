@@ -10,7 +10,8 @@ cat > "$t/bin/aws" <<'STUB'
 #!/usr/bin/env bash
 case "$1 $2" in
   "sts get-caller-identity") echo arn:aws-us-gov:sts::019051664735:assumed-role/r/s ;;
-  "s3api head-object") echo v1 ;;
+  "s3api head-object") echo "${STUB_VERSION:-v1}" ;;
+  "lambda create-function") for a; do case $a in S3Bucket=*) echo "$a" > "$STUB_CODE" ;; esac; done ;;
   "iam create-role") echo arn:aws-us-gov:iam::019051664735:role/smoke ;;
   "lambda invoke")
     for a; do case $a in */response.json) out=$a ;; esac; done
@@ -19,7 +20,7 @@ case "$1 $2" in
 esac
 STUB
 chmod +x "$t/bin/aws"
-export PATH="$t/bin:$PATH" SMOKE_ARTIFACT_BUCKET=b SMOKE_BOUNDARY_ARN=arn:aws-us-gov:iam::019051664735:policy/boundary
+export PATH="$t/bin:$PATH" STUB_CODE="$t/code" SMOKE_ARTIFACT_BUCKET=b SMOKE_BOUNDARY_ARN=arn:aws-us-gov:iam::019051664735:policy/boundary
 
 b64() { printf '%s\n' "$@" | base64 | tr -d '\n'; }
 response() { printf '{"records":[{"recordId":"smoke-1","result":"Ok","data":"%s"}]}' "$(printf 'x %s x' "$1" | base64)"; }
@@ -29,7 +30,8 @@ smoke() { STUB_LOG=$1 STUB_RESPONSE=${2:-$ok_response} "$here/smoke.sh" 0.1.20 u
 fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
 
-check "passes with fips140=true" 'smoke "$(b64 START "$fips_on" END REPORT)"'
+check "passes with fips140=true, pinned to the object version" 'smoke "$(b64 START "$fips_on" END REPORT)" && grep -q ",S3ObjectVersion=v1$" "$STUB_CODE"'
+check "passes for an unversioned object, without a version" 'STUB_VERSION=None smoke "$(b64 "$fips_on")" && ! grep -q S3ObjectVersion "$STUB_CODE"'
 check "fails for a non-FIPS binary" '! smoke "$(b64 START "${fips_on/true/false}" END)"'
 check "fails with no evidence" '! smoke "$(b64 START END REPORT)"'
 check "fails with no log tail" '! smoke ""'
