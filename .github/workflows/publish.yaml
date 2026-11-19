@@ -165,3 +165,32 @@ jobs:
           generate_release_notes: true
           files: release/*
 
+  # Moves the commercial default in the CloudFormation template and the Terraform module
+  # (ci/bump-consumers.sh). A job of its own with continue-on-error, so a bump problem never
+  # marks the release (which would skip publish-govcloud) failed; a failure still shows on the run as an error annotation.
+  # Skipped until the GitHub App is configured.
+  bump-consumers:
+    needs: [build, publish]
+    if: ${{ needs.build.outputs.version != '' && vars.CONSUMER_BUMP_APP_ID != '' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get a token for the consumer repositories
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CONSUMER_BUMP_APP_ID }}
+          private-key: ${{ secrets.CONSUMER_BUMP_APP_KEY }}
+          owner: coralogix
+          repositories: cloudformation-coralogix-aws,terraform-coralogix-aws
+
+      - name: Propose the version as the commercial default
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash ci/bump-consumers.sh commercial "$VERSION"
