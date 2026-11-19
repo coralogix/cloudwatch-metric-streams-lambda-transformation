@@ -48,6 +48,9 @@ jobs:
       - name: Test the GovCloud smoke check
         run: ci/govcloud/test-smoke.sh
 
+      - name: Test the consumer bump
+        run: ci/test-bump-consumers.sh
+
       - name: Test build
         run: make build
 

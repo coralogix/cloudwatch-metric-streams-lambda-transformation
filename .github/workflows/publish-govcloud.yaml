@@ -307,3 +307,23 @@ jobs:
             SMOKE_ARTIFACT_BUCKET="$BUCKET_PREFIX-$region" SMOKE_RUN_ID="$SMOKE_RUN_ID-$region" \
               bash ci/govcloud/smoke.sh "$VERSION" "$region"
           done
+
+  # Moves the govcloud default in the CloudFormation template and the Terraform module
+  # (ci/bump-consumers.sh). A job of its own with continue-on-error, so a bump problem never
+  # marks the GovCloud publication failed; a failure still shows on the run as an error annotation.
+  bump-consumers:
+    needs: [verify, smoke]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Propose the version as the govcloud default
+        env:
+          # The org automation token (coralogix-automation-golem), as the shipper's sync uses.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: bash ci/bump-consumers.sh govcloud "$VERSION"

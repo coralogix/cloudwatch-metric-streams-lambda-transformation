@@ -29,3 +29,20 @@ Every merge to `main` that changes the code (Go sources other than tests, `go.mo
 To release a merge that didn't touch the code, run the `publish` workflow manually on `main`. A manual run ignores `skip-release`.
 
 If a run fails, re-run it: a commit keeps the version it was given, and a commit already included in a newer release isn't released again.
+
+### Default version in the CloudFormation template and Terraform module
+
+The `firehose-metrics` CloudFormation template (`cloudformation-coralogix-aws`) and Terraform module (`terraform-coralogix-aws`) each have two default processor versions, one for commercial regions and one for GovCloud, on the lines marked `bump-consumers: commercial` and `bump-consumers: govcloud`. Customers set the same parameter in both partitions; only the default differs, and normally it doesn't.
+
+`ci/bump-consumers.sh` moves them with one rolling pull request per repository:
+
+- `publish` moves the commercial default after a release;
+- `publish-govcloud` moves the GovCloud default once the release has passed the GovCloud smoke test, a few minutes later, in the same pull request.
+
+Later releases update the same pull requests; a re-run of an older release never moves a default back.
+
+- **Normal release:** merge the pull request once it moves both defaults, then let each repository release as usual.
+- **Commercial-only fix, or GovCloud on hold** (`GOVCLOUD_PUBLISH=false`): the pull request moves only the commercial default; merge it as usual. GovCloud keeps its version until a release passes the GovCloud smoke test and is approved.
+- **Security fix:** the same path on an expedited schedule (validation, approval and release, then an announcement); it skips the wait, not the checks.
+
+The bump runs in its own `bump-consumers` job, which can fail without failing the release or the GovCloud publication; check its annotation when a run shows one. To retry it, or to refresh an open pull request after master has moved (for example when a consumer's release changed its next version), re-run that job: in the release's `publish` run for the commercial default, in its `publish-govcloud` run for the GovCloud default. Re-running a version rebuilds the pull request from current master and never moves a default back.
