@@ -13,6 +13,7 @@ cat > "$t/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 # gh pr list|create|edit -R owner/repo ...; one open PR per repo, kept as $PRS/<repo>
 set -euo pipefail
+[ "$1 $2" != "api user" ] || { echo "test-bot 1"; exit 0; }
 op=$2; shift 2; repo="" title=""
 while [ $# -gt 0 ]; do case $1 in -R) repo=$2; shift 2 ;; --title) title=$2; shift 2 ;; --jq|--json|--head|--state|--base|--body) shift 2 ;; *) shift ;; esac; done
 f=$PRS/${repo#*/}
@@ -90,6 +91,7 @@ check "release notes: SemanticVersion, CHANGELOG, next module version" 'branch_h
 
 run govcloud 0.1.20
 check "the GovCloud pass updates the same PR" '[ "$(logs cloudformation-coralogix-aws)" = "create edit " ] && [ "$(line "$cfn" $T govcloud)" = 0.1.20 ] && [ "$(line "$cfn" $T commercial)" = 0.1.20 ]'
+check "the commit is attributed to the token's account" '[ "$(git -C "$cfn" log -1 --format="%an <%ae>" bump/firehose-processor)" = "test-bot <1+test-bot@users.noreply.github.com>" ]'
 check "title says both moved" '[ "$(title cloudformation-coralogix-aws)" = "firehose-metrics: default processor 0.1.20 (commercial and GovCloud)" ]'
 check "one commit, one CHANGELOG entry, one version step" '[ "$(commits "$cfn")" = 1 ] && [ "$(show "$cfn" bump/firehose-processor aws-integrations/firehose-metrics/CHANGELOG.md | grep -c "^### ")" = 2 ] && branch_has "$cfn" $T "SemanticVersion: 0.1.8"'
 

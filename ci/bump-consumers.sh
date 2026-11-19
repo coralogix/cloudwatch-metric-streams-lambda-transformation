@@ -36,6 +36,11 @@ remote=${CONSUMER_REMOTE:-https://x-access-token:${GH_TOKEN:?GH_TOKEN is require
 branch=bump/firehose-processor
 release_url=https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases/tag/v$version
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+# Commit as the token's account (in CI coralogix-automation-golem, as the shipper's sync), so
+# the commit is attributed to a real user for the CLA check and the rulesets.
+me=$(gh api user --jq '"\(.login) \(.id)"') || { echo "::error::GH_TOKEN can't read its own user" >&2; exit 1; }
+[[ $me =~ ^[A-Za-z0-9-]+(\[bot\])?\ [0-9]+$ ]] || { echo "::error::unexpected user from GH_TOKEN: '$me'" >&2; exit 1; }
+author_name=${me% *} author_email="${me#* }+${me% *}@users.noreply.github.com"
 
 newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; } # newer A B: A > B
 
@@ -149,7 +154,8 @@ update() { # update <owner/repo> <base> <file> <notes function>
     || { echo "::error::$repo: failed to set the defaults in $file" >&2; return 1; }
   changes=$(summary "$target_commercial" "$target_govcloud")
   title=$($notes) && [ -n "$title" ] || { echo "::error::$repo: could not write the release notes" >&2; return 1; }
-  git -c user.name="coralogix-release-bot" -c user.email="noreply@coralogix.com" commit -q -am "$title"
+  GIT_AUTHOR_NAME=$author_name GIT_AUTHOR_EMAIL=$author_email GIT_COMMITTER_NAME=$author_name GIT_COMMITTER_EMAIL=$author_email \
+    git commit -q -am "$title"
   # An identical branch only skips the push: the PR is still created or updated below, so a
   # run whose PR call failed after pushing is completed by the next one.
   if [ -n "$old" ] && [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "$old^{tree}")" ]; then
