@@ -13,7 +13,26 @@ cat > "$t/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 # gh pr list|create|edit -R owner/repo ...; one open PR per repo, kept as $PRS/<repo>
 set -euo pipefail
-[ "$1 $2" != "api user" ] || { echo "test-bot 1"; exit 0; }
+# api graphql createCommitOnBranch: applies the additions on the branch as test-bot, only if
+# the branch head is expectedHeadOid, and records the commit as verified (GitHub signs it).
+if [ "$1 $2" = "api graphql" ]; then
+  in=$4; i=.variables.input
+  repo=$(jq -r "$i.branch.repositoryNameWithOwner" "$in") br=$(jq -r "$i.branch.branchName" "$in")
+  remote=${CONSUMER_REMOTE#file://}$repo.git
+  head=$(git -C "$remote" rev-parse -q --verify "refs/heads/$br") || { echo "stub: no branch $br" >&2; exit 1; }
+  [ "$head" = "$(jq -r "$i.expectedHeadOid" "$in")" ] || { echo "stub: expectedHeadOid is not the branch head" >&2; exit 1; }
+  w=$(mktemp -d); git clone -q -b "$br" "$remote" "$w"
+  jq -c "$i.fileChanges.additions[]" "$in" | while read -r a; do
+    p=$(jq -r .path <<<"$a"); jq -r .contents <<<"$a" | base64 -d > "$w/$p"
+  done
+  GIT_AUTHOR_NAME=test-bot GIT_AUTHOR_EMAIL=1+test-bot@users.noreply.github.com \
+    GIT_COMMITTER_NAME=test-bot GIT_COMMITTER_EMAIL=1+test-bot@users.noreply.github.com \
+    git -C "$w" commit -qam "$(jq -r "$i.message.headline" "$in")"
+  git -C "$w" push -q origin "$br"; git -C "$w" rev-parse HEAD | tee -a "$PRS/verified"; rm -rf "$w"; exit 0
+fi
+if [ "$1" = api ] && [[ $2 == repos/*/commits/* ]]; then
+  grep -qx "${2##*/}" "$PRS/verified" 2>/dev/null && echo true || echo false; exit 0
+fi
 op=$2; shift 2; repo="" title=""
 while [ $# -gt 0 ]; do case $1 in -R) repo=$2; shift 2 ;; --title) title=$2; shift 2 ;; --jq|--json|--head|--state|--base|--body) shift 2 ;; *) shift ;; esac; done
 f=$PRS/${repo#*/}
@@ -65,6 +84,17 @@ printf '# Changelog\n\n## v4.18.1\n\nprevious\n' > "$t/tf-changelog.md"
 printf 'aws-integrations/firehose-metrics/template.yaml\t%s\naws-integrations/firehose-metrics/CHANGELOG.md\t%s\n' "$t/template.yaml" "$t/cfn-changelog.md" | seed cloudformation-coralogix-aws
 printf 'modules/firehose-metrics/main.tf\t%s\nCHANGELOG.md\t%s\n' "$t/main.tf" "$t/tf-changelog.md" | seed terraform-coralogix-aws
 git -C "$t/remotes/coralogix/terraform-coralogix-aws.git" tag v4.18.1 master
+# GitHub closes a PR whose branch matches its base, so the bump branch must never point at
+# master's tip, not even between two steps. This hook rejects any update that would.
+cat > "$t/remotes/coralogix/cloudformation-coralogix-aws.git/hooks/pre-receive" <<'X'
+#!/usr/bin/env bash
+while read -r _ new ref; do
+  if [ "$ref" = refs/heads/bump/firehose-processor ] && [ "$new" = "$(git rev-parse refs/heads/master)" ]; then
+    echo "bump branch would match master" >> "$(dirname "$PWD")/../empty-branch"; exit 1
+  fi
+done
+X
+chmod +x "$t/remotes/coralogix/cloudformation-coralogix-aws.git/hooks/pre-receive"
 
 cfn=$t/remotes/coralogix/cloudformation-coralogix-aws.git tf=$t/remotes/coralogix/terraform-coralogix-aws.git
 show() { git -C "$1" show "$2:$3" 2>/dev/null; }                    # show <remote> <ref> <path>
@@ -130,6 +160,11 @@ commit_on_master "$cfn" aws-integrations/other/NOTES.md "another unrelated chang
 run govcloud 0.1.22
 check "re-running a version refreshes the PR after master moved" 'show "$cfn" bump/firehose-processor aws-integrations/other/NOTES.md | grep -q another && [ "$(line "$cfn" $T commercial)" = 0.1.23 ] && [ "$(commits "$cfn")" = 1 ]'
 
+unsigned=$(tip "$cfn"); grep -vx "$unsigned" "$PRS/verified" > "$t/v" || true; mv "$t/v" "$PRS/verified" # as if pushed with git
+run govcloud 0.1.22
+check "an unverified branch head is rebuilt as a verified commit" '[ "$(tip "$cfn")" != "$unsigned" ] && grep -qx "$(tip "$cfn")" "$PRS/verified" && [ "$(commits "$cfn")" = 1 ]'
+check "commits are verified and made through the API" '[ "$(git -C "$cfn" log -1 --format=%an bump/firehose-processor)" = test-bot ]'
+
 check "a failed PR update fails the run" '! GH_FAIL_EDIT=1 run commercial 0.1.24'
 
 git -C "$cfn" update-ref -d refs/heads/bump/firehose-processor
@@ -143,6 +178,8 @@ GH_FAIL_CREATE=1 run govcloud 0.1.27 || true; rm -f "$PRS/cloudformation-coralog
 run commercial 0.1.27
 check "a stranded branch keeps its pending values" '[ "$(line "$cfn" $T govcloud)" = 0.1.27 ] && [ "$(line "$cfn" $T commercial)" = 0.1.27 ]'
 
+check "the bump branch never matched master" '[ ! -e "$t/empty-branch" ]'
+check "no temporary branches are left" '[ -z "$(git -C "$cfn" for-each-ref --format="%(refname)" "refs/heads/bump/firehose-processor-*")" ]'
 check "an unknown channel is rejected" '! run staging 0.1.22'
 commit_on_master "$tf" modules/firehose-metrics/main.tf 'lambda_processor_default_version = "0.1.21"'
 run commercial 0.1.28 && rc=0 || rc=$?
