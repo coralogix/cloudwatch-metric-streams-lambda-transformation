@@ -16,8 +16,12 @@
 #     channel's pending value from the open PR, and changes only the two version lines and
 #     the release notes, so unrelated changes are never reverted. Re-running a version
 #     refreshes an open PR after master has moved (new release headings);
-#   - pushes with a lease on the branch commit it read, and redoes the whole update when
-#     another run pushed first, so concurrent runs can't overwrite each other;
+#   - creates the commit through GitHub's API (createCommitOnBranch), like the shipper's
+#     template sync: GitHub signs it, as the rulesets require, and attributes it to the
+#     account behind GH_TOKEN. The commit is made on a temporary branch at master's tip, then
+#     the bump branch moves straight to it with a lease on the commit it read, so concurrent
+#     runs can't overwrite each other (the loser redoes the whole update) and the bump branch
+#     never matches master, which would make GitHub close its PR;
 #   - follows the consumer's release rules (CHANGELOG entry, template SemanticVersion, or
 #     the next module version that semantic-release will cut).
 #
@@ -36,11 +40,6 @@ remote=${CONSUMER_REMOTE:-https://x-access-token:${GH_TOKEN:?GH_TOKEN is require
 branch=bump/firehose-processor
 release_url=https://github.com/coralogix/cloudwatch-metric-streams-lambda-transformation/releases/tag/v$version
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-# Commit as the token's account (in CI coralogix-automation-golem, as the shipper's sync), so
-# the commit is attributed to a real user for the CLA check and the rulesets.
-me=$(gh api user --jq '"\(.login) \(.id)"') || { echo "::error::GH_TOKEN can't read its own user" >&2; exit 1; }
-[[ $me =~ ^[A-Za-z0-9-]+(\[bot\])?\ [0-9]+$ ]] || { echo "::error::unexpected user from GH_TOKEN: '$me'" >&2; exit 1; }
-author_name=${me% *} author_email="${me#* }+${me% *}@users.noreply.github.com"
 
 newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; } # newer A B: A > B
 
@@ -107,7 +106,7 @@ bump() { # bump <owner/repo> <base> <file> <notes function>
 
 # One read/merge/push. Returns 75 when the push lost the race, so bump() retries.
 update() { # update <owner/repo> <base> <file> <notes function>
-  local repo=$1 base=$2 file=$3 notes=$4 dir pr old title ch draft
+  local repo=$1 base=$2 file=$3 notes=$4 dir pr old title ch draft tip tmp new rc
   # master_*, pending_* and target_* hold each channel's value: on master, in the PR to
   # push, and what the PR changes (empty = unchanged). Plain variables for bash 3.
   local master_commercial master_govcloud pending_commercial pending_govcloud target_commercial target_govcloud
@@ -154,15 +153,36 @@ update() { # update <owner/repo> <base> <file> <notes function>
     || { echo "::error::$repo: failed to set the defaults in $file" >&2; return 1; }
   changes=$(summary "$target_commercial" "$target_govcloud")
   title=$($notes) && [ -n "$title" ] || { echo "::error::$repo: could not write the release notes" >&2; return 1; }
-  GIT_AUTHOR_NAME=$author_name GIT_AUTHOR_EMAIL=$author_email GIT_COMMITTER_NAME=$author_name GIT_COMMITTER_EMAIL=$author_email \
-    git commit -q -am "$title"
-  # An identical branch only skips the push: the PR is still created or updated below, so a
-  # run whose PR call failed after pushing is completed by the next one.
-  if [ -n "$old" ] && [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "$old^{tree}")" ]; then
+  # Up to date: the branch already holds exactly this content in a verified commit. That only
+  # skips the push: the PR is still created or updated below, so a run whose PR call failed
+  # after pushing is completed by the next one. An unverified head (pushed outside this
+  # script) is rebuilt, since the rulesets reject unsigned commits.
+  if [ -n "$old" ] && git diff --quiet "$old" -- . \
+      && [ "$(gh api "repos/$repo/commits/$old" --jq .commit.verification.verified)" = true ]; then
     echo "$repo: $branch is up to date: $changes"
   else
     [ -z "${BUMP_TEST_BEFORE_PUSH:-}" ] || "$BUMP_TEST_BEFORE_PUSH" "$repo" # test seam: simulate a concurrent run
-    git push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" || return 75
+    tip=$(git rev-parse "origin/$base")
+    tmp=$branch-$(date +%s)-$$-$RANDOM
+    git push -q origin "$tip:refs/heads/$tmp"
+    git diff --name-only "origin/$base" | while read -r f; do
+      base64 < "$f" | tr -d '\n' > "$work/b64"
+      jq -n --arg path "$f" --rawfile contents "$work/b64" '{path: $path, contents: $contents}'
+    done | jq -s . > "$work/additions.json"
+    jq -n --arg repo "$repo" --arg tmp "$tmp" --arg oid "$tip" --arg msg "$title" --slurpfile adds "$work/additions.json" \
+      '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+        variables: {input: {branch: {repositoryNameWithOwner: $repo, branchName: $tmp}, expectedHeadOid: $oid,
+                            fileChanges: {additions: $adds[0]}, message: {headline: $msg}}}}' > "$work/commit.json"
+    # An if, so a failure here (lost race) still reaches the cleanup; errexit would skip it.
+    if new=$(gh api graphql --input "$work/commit.json" --jq .data.createCommitOnBranch.commit.oid) \
+      && git fetch -q origin "refs/heads/$tmp" \
+      && git push -q --force-with-lease="refs/heads/$branch:$old" origin "$new:refs/heads/$branch"; then
+      rc=0
+    else
+      rc=75
+    fi
+    git push -q origin --delete "$tmp" || echo "::warning::$repo: could not delete $tmp" >&2
+    [ "$rc" -eq 0 ] || return 75
   fi
 
   body="Moves the default processor: $changes. [Releases](${release_url%/tag/*})
