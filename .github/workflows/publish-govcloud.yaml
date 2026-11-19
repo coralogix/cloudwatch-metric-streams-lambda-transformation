@@ -327,3 +327,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: bash ci/bump-consumers.sh govcloud "$VERSION"
+
+      # Asks for review in Slack, like the shipper's template sync. Here, after the GovCloud default
+      # was added, so one message covers both defaults.
+      - name: Announce the bump PRs
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_MENTION: ${{ vars.SLACK_MENTION || '@team-ido' }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: bash ci/notify-bump.sh "$VERSION"

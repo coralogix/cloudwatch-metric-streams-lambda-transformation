@@ -39,7 +39,7 @@ The `firehose-metrics` CloudFormation template (`cloudformation-coralogix-aws`) 
 - `publish` moves the commercial default after a release;
 - `publish-govcloud` moves the GovCloud default once the release has passed the GovCloud smoke test, a few minutes later, in the same pull request.
 
-Later releases update the same pull requests; a re-run of an older release never moves a default back.
+Later releases update the same pull requests; a re-run of an older release never moves a default back. Once the pull requests are updated, `ci/notify-bump.sh` posts them to Slack (`SLACK_WEBHOOK_URL`, mentioning `SLACK_MENTION`, default `@team-ido`), as the shipper's template sync does: after the GovCloud default when GovCloud publishing is on (`GOVCLOUD_PUBLISH=true`), otherwise after the commercial default. The commits are attributed to the account behind `GH_TOKEN`.
 
 - **Normal release:** merge the pull request once it moves both defaults, then let each repository release as usual.
 - **Commercial-only fix, or GovCloud on hold** (`GOVCLOUD_PUBLISH=false`): the pull request moves only the commercial default; merge it as usual. GovCloud keeps its version until a release passes the GovCloud smoke test and is approved.

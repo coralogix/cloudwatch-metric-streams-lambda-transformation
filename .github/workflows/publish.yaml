@@ -185,3 +185,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
         run: bash ci/bump-consumers.sh commercial "$VERSION"
+
+      # Asks for review in Slack, like the shipper's template sync. Only when GovCloud publishing
+      # is off: otherwise publish-govcloud announces once the PRs also carry the GovCloud default.
+      - name: Announce the bump PRs
+        if: ${{ vars.GOVCLOUD_PUBLISH != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_MENTION: ${{ vars.SLACK_MENTION || '@team-ido' }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash ci/notify-bump.sh "$VERSION"
