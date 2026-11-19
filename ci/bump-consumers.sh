@@ -119,13 +119,16 @@ update() { # update <owner/repo> <base> <file> <notes function>
   # The lease: the branch commit this update builds on (empty = the branch must not exist).
   old=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
   pr=$(gh pr list -R "$repo" --head "$branch" --state open --json number --jq '.[0].number // empty')
-  if [ -n "$pr" ]; then
-    # A PR's pending values must be read; falling back to master would drop them.
-    if ! { [ -n "$old" ] && git fetch -q origin "$old" && git show "$old:$file" > "$work/pending"; }; then
-      echo "::error::$repo: can't read $file from PR #$pr's branch $branch" >&2; return 1
+  # The branch's pending values must be read whenever it exists, including a branch whose PR
+  # could not be created; falling back to master would drop them.
+  if [ -n "$old" ]; then
+    if ! { git fetch -q origin "$old" && git show "$old:$file" > "$work/pending"; }; then
+      echo "::error::$repo: can't read $file from $branch" >&2; return 1
     fi
     ch=$(read_default "$work/pending" commercial); [ -z "$ch" ] || pending_commercial=$(max "$master_commercial" "$ch")
     ch=$(read_default "$work/pending" govcloud); [ -z "$ch" ] || pending_govcloud=$(max "$master_govcloud" "$ch")
+  elif [ -n "$pr" ]; then
+    echo "::error::$repo: PR #$pr is open but its branch $branch is missing" >&2; return 1
   fi
   if [ "$channel" = commercial ]; then
     pending_commercial=$(max "$pending_commercial" "$version")
@@ -147,11 +150,14 @@ update() { # update <owner/repo> <base> <file> <notes function>
   changes=$(summary "$target_commercial" "$target_govcloud")
   title=$($notes) && [ -n "$title" ] || { echo "::error::$repo: could not write the release notes" >&2; return 1; }
   git -c user.name="coralogix-release-bot" -c user.email="noreply@coralogix.com" commit -q -am "$title"
+  # An identical branch only skips the push: the PR is still created or updated below, so a
+  # run whose PR call failed after pushing is completed by the next one.
   if [ -n "$old" ] && [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "$old^{tree}")" ]; then
-    echo "$repo: PR #$pr is up to date: $changes"; return 0
+    echo "$repo: $branch is up to date: $changes"
+  else
+    [ -z "${BUMP_TEST_BEFORE_PUSH:-}" ] || "$BUMP_TEST_BEFORE_PUSH" "$repo" # test seam: simulate a concurrent run
+    git push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" || return 75
   fi
-  [ -z "${BUMP_TEST_BEFORE_PUSH:-}" ] || "$BUMP_TEST_BEFORE_PUSH" "$repo" # test seam: simulate a concurrent run
-  git push -q --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch" || return 75
 
   body="Moves the default processor: $changes. [Releases](${release_url%/tag/*})
 
@@ -165,7 +171,8 @@ Opened by cloudwatch-metric-streams-lambda-transformation's ci/bump-consumers.sh
     echo "$repo: updated PR #$pr: $changes"
   else
     draft=(); [ "${BUMP_PR_DRAFT:-}" = true ] && draft=(--draft)
-    # A concurrent run may have opened it first: retry, and the next pass edits it.
+    # Retried: a concurrent run may have opened it first, and the next pass edits it. If
+    # creating keeps failing, the run fails and a re-run creates it from the pushed branch.
     gh pr create -R "$repo" --base "$base" --head "$branch" --title "$title" --body "$body" ${draft[@]+"${draft[@]}"} >/dev/null || return 75
     echo "$repo: opened a PR: $changes"
   fi

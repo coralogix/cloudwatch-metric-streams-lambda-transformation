@@ -18,7 +18,8 @@ while [ $# -gt 0 ]; do case $1 in -R) repo=$2; shift 2 ;; --title) title=$2; shi
 f=$PRS/${repo#*/}
 case $op in
   list) [ -f "$f" ] && echo "$(cut -d' ' -f1 "$f")" || true ;;
-  create) echo "1 $title" > "$f"; echo create >> "$f.log" ;;
+  create) [ -z "${GH_FAIL_CREATE:-}" ] || { echo "stub: create failed" >&2; exit 1; }
+          echo "1 $title" > "$f"; echo create >> "$f.log" ;;
   edit) [ -z "${GH_FAIL_EDIT:-}" ] || { echo "stub: edit failed" >&2; exit 1; }
         echo "1 $title" > "$f"; echo edit >> "$f.log" ;;
 esac
@@ -70,6 +71,7 @@ branch_has() { show "$1" bump/firehose-processor "$2" | grep -qF -- "$3"; }
 tip() { git -C "$1" rev-parse -q --verify bump/firehose-processor || true; }
 commits() { git -C "$1" rev-list --count master..bump/firehose-processor; }
 logs() { cat "$PRS/$1.log" 2>/dev/null | tr '\n' ' '; }
+creates() { grep -c create "$PRS/$1.log" 2>/dev/null || true; }
 run() { "$here/bump-consumers.sh" "$1" "$2" >>"$t/out" 2>&1; }
 T=aws-integrations/firehose-metrics/template.yaml
 line() { show "$1" bump/firehose-processor "$2" | grep "bump-consumers: $3" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'; } # line <remote> <path> <channel>
@@ -93,7 +95,7 @@ check "one commit, one CHANGELOG entry, one version step" '[ "$(commits "$cfn")"
 
 before=$(tip "$cfn")
 run govcloud 0.1.20; run commercial 0.1.20
-check "re-runs of the same release change nothing" '[ "$(tip "$cfn")" = "$before" ] && [ "$(logs cloudformation-coralogix-aws)" = "create edit " ]'
+check "re-runs of the same release push nothing and open no PR" '[ "$(tip "$cfn")" = "$before" ] && [ "$(creates cloudformation-coralogix-aws)" = 1 ]'
 run commercial 0.1.19
 check "an older release never downgrades" '[ "$(tip "$cfn")" = "$before" ]'
 
@@ -106,9 +108,9 @@ check "the branch is rebuilt on current master" 'show "$cfn" bump/firehose-proce
 git -C "$cfn" update-ref refs/heads/master bump/firehose-processor; rm -f "$PRS/cloudformation-coralogix-aws"
 before=$(tip "$cfn")
 run govcloud 0.1.20
-check "after the merge an older re-run does nothing" '[ "$(tip "$cfn")" = "$before" ] && [ "$(logs cloudformation-coralogix-aws)" = "create edit edit " ]'
+check "after the merge an older re-run does nothing" '[ "$(tip "$cfn")" = "$before" ] && [ "$(creates cloudformation-coralogix-aws)" = 1 ]'
 run govcloud 0.1.21
-check "a later GovCloud pass opens a new PR with only that line" '[ "$(logs cloudformation-coralogix-aws)" = "create edit edit create " ] && [ "$(title cloudformation-coralogix-aws)" = "firehose-metrics: default processor 0.1.21 (GovCloud)" ]'
+check "a later GovCloud pass opens a new PR with only that line" '[ "$(creates cloudformation-coralogix-aws)" = 2 ] && [ "$(title cloudformation-coralogix-aws)" = "firehose-metrics: default processor 0.1.21 (GovCloud)" ]'
 
 # A concurrent commercial run pushes between this run's read and its push: the lease
 # rejects the push and the retry keeps both moves.
@@ -132,9 +134,16 @@ git -C "$cfn" update-ref -d refs/heads/bump/firehose-processor
 check "an open PR whose branch can't be read fails instead of dropping its values" '! run commercial 0.1.25 && [ -z "$(tip "$cfn")" ]'
 rm -f "$PRS/cloudformation-coralogix-aws" # that PR is closed
 
+check "a failed PR creation fails the run, even after the branch is pushed" '! GH_FAIL_CREATE=1 run commercial 0.1.26 && [ ! -e "$PRS/cloudformation-coralogix-aws" ] && [ "$(line "$cfn" $T commercial)" = 0.1.26 ]'
+run commercial 0.1.26
+check "a re-run creates the missing PR from the pushed branch" '[ -e "$PRS/cloudformation-coralogix-aws" ] && [ "$(title cloudformation-coralogix-aws)" = "firehose-metrics: default processor 0.1.26 (commercial)" ]'
+GH_FAIL_CREATE=1 run govcloud 0.1.27 || true; rm -f "$PRS/cloudformation-coralogix-aws" # pushed, PR creation failed
+run commercial 0.1.27
+check "a stranded branch keeps its pending values" '[ "$(line "$cfn" $T govcloud)" = 0.1.27 ] && [ "$(line "$cfn" $T commercial)" = 0.1.27 ]'
+
 check "an unknown channel is rejected" '! run staging 0.1.22'
 commit_on_master "$tf" modules/firehose-metrics/main.tf 'lambda_processor_default_version = "0.1.21"'
-run commercial 0.1.22 && rc=0 || rc=$?
-check "a consumer without the markers fails, the other is still bumped" '[ "$rc" = 1 ] && [ "$(line "$cfn" $T commercial)" = 0.1.22 ]'
+run commercial 0.1.28 && rc=0 || rc=$?
+check "a consumer without the markers fails, the other is still bumped" '[ "$rc" = 1 ] && [ "$(line "$cfn" $T commercial)" = 0.1.28 ]'
 
 exit $fail
